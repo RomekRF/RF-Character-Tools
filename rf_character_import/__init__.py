@@ -1,7 +1,7 @@
 bl_info = {
     "name": "RF Character Tools (V3C/V3M/RFA)",
     "author": "RF VFX Tools",
-    "version": (1, 8, 2),
+    "version": (1, 9, 21),
     "blender": (4, 0, 0),
     "location": "File > Import/Export, 3D View > Sidebar > RF Character",
     "description": "Import and export Red Faction character meshes, animations, and rigs",
@@ -484,7 +484,10 @@ def _import_mesh(v3c, arm_obj, bone_names, lod_index=0, name_suffix=""):
     # Create mesh
     mesh_name = sm['name'] + name_suffix
     mesh = bpy.data.meshes.new(mesh_name)
+    if not all_verts or not all_faces:
+        return None
     mesh.from_pydata([tuple(v) for v in all_verts], [], all_faces)
+    mesh.validate(clean_customdata=False)
 
     # Materials with proper image texture nodes
     mat_flags_list = sm.get('material_flags', [0] * len(tex_list))
@@ -543,10 +546,13 @@ def _import_mesh(v3c, arm_obj, bone_names, lod_index=0, name_suffix=""):
 
     # Normals
     if all_normals:
-        normals_list = [tuple(all_normals[l.vertex_index]) if l.vertex_index < len(all_normals)
-                        else (0, 0, 1) for l in mesh.loops]
-        if hasattr(mesh, 'normals_split_custom_set'):
-            mesh.normals_split_custom_set(normals_list)
+        try:
+            normals_list = [tuple(all_normals[l.vertex_index]) if l.vertex_index < len(all_normals)
+                            else (0, 0, 1) for l in mesh.loops]
+            if hasattr(mesh, 'normals_split_custom_set'):
+                mesh.normals_split_custom_set(normals_list)
+        except Exception:
+            pass  # Skip custom normals if it fails (known crash in some Blender versions)
 
     mesh.update()
 
@@ -715,6 +721,18 @@ def _import_armature(v3c):
     arm.display_type = 'STICK'
     arm_obj = bpy.data.objects.new("Armature", arm)
     bpy.context.collection.objects.link(arm_obj)
+
+    # Ensure clean context for mode switching
+    try:
+        if bpy.context.active_object and bpy.context.active_object.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+    except Exception:
+        pass
+    try:
+        bpy.ops.object.select_all(action='DESELECT')
+    except Exception:
+        pass
+
     bpy.context.view_layer.objects.active = arm_obj
     arm_obj.select_set(True)
 
@@ -1679,19 +1697,893 @@ _RF_ANIM_DB = {
 }
 
 
+# ═══ MULTIPLAYER ANIMATION DATABASE ═══
+# Generated from pc_multi.tbl + entity.tbl
+# Maps V3C filenames to their MP animation sets
+_RF_MP_ANIM_DB = {
+    "enviro_parker.v3c": [  # MP: enviro_parker / miner1, 150 anims
+        "engd_arifle_attack_crouch.rfa", "engd_arifle_attack_run.rfa", "engd_arifle_attack_stand.rfa", "engd_arifle_attack_walk.rfa",
+        "engd_arifle_reload.rfa", "engd_arifle_stand.rfa", "engd_arifle_stand_firing.rfa", "engd_arifle_stand_firing_2.rfa",
+        "engd_rl_attack_crouch.rfa", "engd_rl_attack_stand.rfa", "engd_rl_crouch_firing.rfa", "engd_rl_run.rfa",
+        "engd_rl_stand.rfa", "engd_rl_stand_firing.rfa", "engd_rl_walk.rfa", "engd_SAR_attack_crouch.rfa",
+        "engd_SAR_crouch_fire.rfa", "engd_SAR_stand_firing.rfa", "esgd_attack_crouch.rfa", "esgd_attack_run.rfa",
+        "esgd_attack_stand.rfa", "esgd_attack_walk.rfa", "esgd_firing_stand.rfa", "esgd_mp_reload.rfa",
+        "esgd_stand.rfa", "miner_corpse_carry.rfa", "miner_dead.rfa", "miner_talk.rfa",
+        "miner_talk_short.rfa", "park_Death_crouch.rfa", "park_Death_head_backwards.rfa", "park_ft_alt_fire_stand.rfa",
+        "park_ft_attack_crouch.rfa", "park_ft_attack_stand.rfa", "park_ft_crouch_fire.rfa", "park_ft_reload.rfa",
+        "park_ft_run.rfa", "park_ft_stand_fire.rfa", "park_ft_walk.rfa", "park_grenade_throw.rfa",
+        "park_grenade_throw_alt.rfa", "park_HG_crouch_walk.rfa", "park_hmac_attack_crouch.rfa", "park_hmac_attack_stand.rfa",
+        "park_hmac_crouch_fire.rfa", "park_hmac_crouch_walk.rfa", "park_hmac_idle.rfa", "park_hmac_reload.rfa",
+        "park_hmac_run.rfa", "park_hmac_stand.rfa", "park_hmac_stand_fire.rfa", "park_hmac_walk.rfa",
+        "park_jeep_driver.rfa", "park_jeep_gunner.rfa", "park_MP_crouch_walk.rfa", "park_remotecharge_throw.rfa",
+        "park_riotstick_crouch.rfa", "park_riotstick_crouch_swing.rfa", "park_riotstick_crouch_taser.rfa", "park_riotstick_reload.rfa",
+        "park_riotstick_stand.rfa", "park_riotstick_swing1.rfa", "park_riotstick_taser.rfa", "park_rrif_attack_crouch.rfa",
+        "park_rrif_attack_stand.rfa", "park_rrif_crouch_fire.rfa", "park_rrif_idle.rfa", "park_rrif_run.rfa",
+        "park_rrif_stand.rfa", "park_rrif_stand_fire.rfa", "park_rrif_walk.rfa", "park_Rshield_crouch_walk.rfa",
+        "park_Rstick_crouch_walk.rfa", "park_run.rfa", "park_run_flail.rfa", "park_run_flee_HMAC.rfa",
+        "park_SC_crouch_walk.rfa", "park_SG_crouch_walk.rfa", "park_shotgun_attack_stand.rfa", "park_shotgun_crouch.rfa",
+        "park_shotgun_crouchfireauto.rfa", "park_shotgun_crouchfirepump.rfa", "park_shotgun_reload.rfa", "park_shotgun_run.rfa",
+        "park_shotgun_stand.rfa", "park_shotgun_stand_fireauto.rfa", "park_shotgun_stand_firepump.rfa", "park_shotgun_walk.rfa",
+        "park_smw_crouch.rfa", "park_smw_crouch_fire.rfa", "park_smw_flinch_back.rfa", "park_smw_flinch_front.rfa",
+        "park_smw_idle.rfa", "park_smw_run.rfa", "park_smw_stand.rfa", "park_smw_stand_fire.rfa",
+        "park_smw_walk.rfa", "park_sniper_attack_crouch.rfa", "park_sniper_attack_stand.rfa", "park_sniper_crouch_fire.rfa",
+        "park_sniper_reload.rfa", "park_sniper_run.rfa", "park_sniper_stand.rfa", "park_sniper_stand_fire.rfa",
+        "park_sniper_walk.rfa", "park_swim_stand.rfa", "park_swim_walk.rfa", "rtgd_riotshield_attack.rfa",
+        "rtgd_riotshield_attackstand.rfa", "rtgd_riotshield_crouch.rfa", "rtgd_riotshield_flinch_back.rfa", "rtgd_riotshield_flinchfront.rfa",
+        "rtgd_riotshield_run.rfa", "rtgd_riotshield_stand.rfa", "rtgd_riotshield_walk.rfa", "rtgd_riotshieldattackcrouch.rfa",
+        "ult2_attack_crouch01.rfa", "ult2_attack_run.rfa", "ult2_attack_stand.rfa", "ult2_attack_walk.rfa",
+        "ult2_corpse_drop.rfa", "ult2_corpsecarry_stand.rfa", "ult2_corpsecarry_walk.rfa", "ult2_cower.rfa",
+        "ult2_crouch.rfa", "ult2_Death_blast_forwards.rfa", "ult2_Death_chest_backward.rfa", "ult2_Death_chest_forward.rfa",
+        "ult2_Death_Generic.rfa", "ult2_Death_head_forwards.rfa", "ult2_Death_leg_Left.rfa", "ult2_Death_leg_Right.rfa",
+        "ult2_draw.rfa", "ult2_firing_crouch.rfa", "ult2_firing_stand.rfa", "Ult2_flee_run.rfa",
+        "ult2_flinch_astand.rfa", "Ult2_Flinch_ChestB.rfa", "Ult2_Flinch_ChestF.rfa", "Ult2_Flinch_LegL.rfa",
+        "Ult2_Flinch_LegR.rfa", "ult2_flinch_stand.rfa", "ult2_idle_HitHead.rfa", "ult2_jump.rfa",
+        "ult2_reload.rfa", "ult2_run.rfa", "Ult2_run_flee_AR.rfa", "ult2_silencer.rfa",
+        "ult2_stand.rfa", "ult2_walk.rfa",
+    ],
+    "parker_sci.v3c": [  # MP: scientist_parker / miner1, 156 anims
+        "engd_arifle_attack_crouch.rfa", "engd_arifle_attack_run.rfa", "engd_arifle_attack_stand.rfa", "engd_arifle_attack_walk.rfa",
+        "engd_arifle_reload.rfa", "engd_arifle_stand.rfa", "engd_arifle_stand_firing.rfa", "engd_arifle_stand_firing_2.rfa",
+        "engd_rl_attack_crouch.rfa", "engd_rl_attack_stand.rfa", "engd_rl_crouch_firing.rfa", "engd_rl_run.rfa",
+        "engd_rl_stand.rfa", "engd_rl_stand_firing.rfa", "engd_rl_walk.rfa", "engd_SAR_attack_crouch.rfa",
+        "engd_SAR_crouch_fire.rfa", "engd_SAR_stand_firing.rfa", "esgd_attack_crouch.rfa", "esgd_attack_run.rfa",
+        "esgd_attack_stand.rfa", "esgd_attack_walk.rfa", "esgd_firing_stand.rfa", "esgd_mp_reload.rfa",
+        "esgd_stand.rfa", "miner_corpse_carry.rfa", "miner_dead.rfa", "miner_talk.rfa",
+        "miner_talk_short.rfa", "park_Death_crouch.rfa", "park_Death_head_backwards.rfa", "park_ft_alt_fire_stand.rfa",
+        "park_ft_attack_crouch.rfa", "park_ft_attack_stand.rfa", "park_ft_crouch_fire.rfa", "park_ft_reload.rfa",
+        "park_ft_run.rfa", "park_ft_stand_fire.rfa", "park_ft_walk.rfa", "park_grenade_throw.rfa",
+        "park_grenade_throw_alt.rfa", "park_HG_crouch_walk.rfa", "park_hg_run.rfa", "park_hmac_attack_crouch.rfa",
+        "park_hmac_attack_stand.rfa", "park_hmac_crouch_fire.rfa", "park_hmac_crouch_walk.rfa", "park_hmac_idle.rfa",
+        "park_hmac_reload.rfa", "park_hmac_run.rfa", "park_hmac_stand.rfa", "park_hmac_stand_fire.rfa",
+        "park_hmac_walk.rfa", "park_jeep_driver.rfa", "park_jeep_gunner.rfa", "park_MP_crouch_walk.rfa",
+        "park_remotecharge_throw.rfa", "park_riotstick_crouch.rfa", "park_riotstick_crouch_swing.rfa", "park_riotstick_crouch_taser.rfa",
+        "park_riotstick_reload.rfa", "park_riotstick_stand.rfa", "park_riotstick_swing1.rfa", "park_riotstick_taser.rfa",
+        "park_rrif_attack_crouch.rfa", "park_rrif_attack_stand.rfa", "park_rrif_crouch_fire.rfa", "park_rrif_idle.rfa",
+        "park_rrif_run.rfa", "park_rrif_stand.rfa", "park_rrif_stand_fire.rfa", "park_rrif_walk.rfa",
+        "park_Rshield_crouch_walk.rfa", "park_Rstick_crouch_walk.rfa", "park_run.rfa", "park_run_flail.rfa",
+        "park_run_flee_HMAC.rfa", "park_SC_crouch_walk.rfa", "park_SG_crouch_walk.rfa", "park_shotgun_attack_stand.rfa",
+        "park_shotgun_crouch.rfa", "park_shotgun_crouchfireauto.rfa", "park_shotgun_crouchfirepump.rfa", "park_shotgun_reload.rfa",
+        "park_shotgun_run.rfa", "park_shotgun_stand.rfa", "park_shotgun_stand_fireauto.rfa", "park_shotgun_stand_firepump.rfa",
+        "park_shotgun_walk.rfa", "park_smw_crouch.rfa", "park_smw_crouch_fire.rfa", "park_smw_flinch_back.rfa",
+        "park_smw_flinch_front.rfa", "park_smw_idle.rfa", "park_smw_run.rfa", "park_smw_stand.rfa",
+        "park_smw_stand_fire.rfa", "park_smw_walk.rfa", "park_sniper_attack_crouch.rfa", "park_sniper_attack_stand.rfa",
+        "park_sniper_crouch_fire.rfa", "park_sniper_reload.rfa", "park_sniper_run.rfa", "park_sniper_stand.rfa",
+        "park_sniper_stand_fire.rfa", "park_sniper_walk.rfa", "park_swim_stand.rfa", "park_swim_walk.rfa",
+        "prk3_talk.rfa", "prk3_talk_short.rfa", "rtgd_riotshield_attack.rfa", "rtgd_riotshield_attackstand.rfa",
+        "rtgd_riotshield_crouch.rfa", "rtgd_riotshield_flinch_back.rfa", "rtgd_riotshield_flinchfront.rfa", "rtgd_riotshield_run.rfa",
+        "rtgd_riotshield_stand.rfa", "rtgd_riotshield_walk.rfa", "rtgd_riotshieldattackcrouch.rfa", "ult2_attack_crouch01.rfa",
+        "ult2_attack_run.rfa", "ult2_attack_stand.rfa", "ult2_attack_walk.rfa", "ult2_corpse_drop.rfa",
+        "ult2_corpsecarry_stand.rfa", "ult2_corpsecarry_walk.rfa", "ult2_cower.rfa", "ult2_crouch.rfa",
+        "ult2_Crouch_Death.rfa", "ult2_Death_blast_backwards.rfa", "ult2_Death_blast_forwards.rfa", "ult2_Death_chest_backward.rfa",
+        "ult2_Death_chest_forward.rfa", "ult2_Death_Generic.rfa", "ult2_Death_head_forwards.rfa", "ult2_Death_leg_Left.rfa",
+        "ult2_Death_leg_Right.rfa", "ult2_draw.rfa", "ult2_firing_crouch.rfa", "ult2_firing_stand.rfa",
+        "Ult2_flee_run.rfa", "ult2_flinch_astand.rfa", "Ult2_Flinch_ChestB.rfa", "Ult2_Flinch_ChestF.rfa",
+        "Ult2_Flinch_LegL.rfa", "Ult2_Flinch_LegR.rfa", "ult2_flinch_stand.rfa", "ult2_idle_HitHead.rfa",
+        "ult2_jump.rfa", "ult2_reload.rfa", "ult2_run.rfa", "Ult2_run_flee_AR.rfa",
+        "ult2_silencer.rfa", "ult2_silencer_off.rfa", "ult2_stand.rfa", "ult2_walk.rfa",
+    ],
+    "parker_suit.v3c": [  # MP: exec_parker / miner1, 155 anims
+        "engd_arifle_attack_crouch.rfa", "engd_arifle_attack_run.rfa", "engd_arifle_attack_stand.rfa", "engd_arifle_attack_walk.rfa",
+        "engd_arifle_reload.rfa", "engd_arifle_stand.rfa", "engd_arifle_stand_firing.rfa", "engd_arifle_stand_firing_2.rfa",
+        "engd_rl_attack_crouch.rfa", "engd_rl_attack_stand.rfa", "engd_rl_crouch_firing.rfa", "engd_rl_run.rfa",
+        "engd_rl_stand.rfa", "engd_rl_stand_firing.rfa", "engd_rl_walk.rfa", "engd_SAR_attack_crouch.rfa",
+        "engd_SAR_crouch_fire.rfa", "engd_SAR_stand_firing.rfa", "esgd_attack_crouch.rfa", "esgd_attack_run.rfa",
+        "esgd_attack_stand.rfa", "esgd_attack_walk.rfa", "esgd_firing_stand.rfa", "esgd_mp_reload.rfa",
+        "esgd_stand.rfa", "miner_corpse_carry.rfa", "miner_dead.rfa", "miner_talk.rfa",
+        "miner_talk_short.rfa", "park_Death_crouch.rfa", "park_Death_head_backwards.rfa", "park_ft_alt_fire_stand.rfa",
+        "park_ft_attack_crouch.rfa", "park_ft_attack_stand.rfa", "park_ft_crouch_fire.rfa", "park_ft_reload.rfa",
+        "park_ft_run.rfa", "park_ft_stand_fire.rfa", "park_ft_walk.rfa", "park_grenade_throw.rfa",
+        "park_grenade_throw_alt.rfa", "park_HG_crouch_walk.rfa", "park_hg_run.rfa", "park_hmac_attack_crouch.rfa",
+        "park_hmac_attack_stand.rfa", "park_hmac_crouch_fire.rfa", "park_hmac_crouch_walk.rfa", "park_hmac_idle.rfa",
+        "park_hmac_reload.rfa", "park_hmac_run.rfa", "park_hmac_stand.rfa", "park_hmac_stand_fire.rfa",
+        "park_hmac_walk.rfa", "park_jeep_driver.rfa", "park_jeep_gunner.rfa", "park_MP_crouch_walk.rfa",
+        "park_remotecharge_throw.rfa", "park_riotstick_crouch.rfa", "park_riotstick_crouch_swing.rfa", "park_riotstick_crouch_taser.rfa",
+        "park_riotstick_reload.rfa", "park_riotstick_stand.rfa", "park_riotstick_swing1.rfa", "park_riotstick_taser.rfa",
+        "park_rrif_attack_crouch.rfa", "park_rrif_attack_stand.rfa", "park_rrif_crouch_fire.rfa", "park_rrif_idle.rfa",
+        "park_rrif_run.rfa", "park_rrif_stand.rfa", "park_rrif_stand_fire.rfa", "park_rrif_walk.rfa",
+        "park_Rshield_crouch_walk.rfa", "park_Rstick_crouch_walk.rfa", "park_run.rfa", "park_run_flail.rfa",
+        "park_run_flee_HMAC.rfa", "park_SC_crouch_walk.rfa", "park_SG_crouch_walk.rfa", "park_shotgun_attack_stand.rfa",
+        "park_shotgun_crouch.rfa", "park_shotgun_crouchfireauto.rfa", "park_shotgun_crouchfirepump.rfa", "park_shotgun_reload.rfa",
+        "park_shotgun_run.rfa", "park_shotgun_stand.rfa", "park_shotgun_stand_fireauto.rfa", "park_shotgun_stand_firepump.rfa",
+        "park_shotgun_walk.rfa", "park_smw_crouch.rfa", "park_smw_crouch_fire.rfa", "park_smw_flinch_back.rfa",
+        "park_smw_flinch_front.rfa", "park_smw_idle.rfa", "park_smw_run.rfa", "park_smw_stand.rfa",
+        "park_smw_stand_fire.rfa", "park_smw_walk.rfa", "park_sniper_attack_crouch.rfa", "park_sniper_attack_stand.rfa",
+        "park_sniper_crouch_fire.rfa", "park_sniper_reload.rfa", "park_sniper_run.rfa", "park_sniper_stand.rfa",
+        "park_sniper_stand_fire.rfa", "park_sniper_walk.rfa", "park_swim_stand.rfa", "park_swim_walk.rfa",
+        "prk2_talk.rfa", "prk2_talk_short.rfa", "rtgd_riotshield_attack.rfa", "rtgd_riotshield_attackstand.rfa",
+        "rtgd_riotshield_crouch.rfa", "rtgd_riotshield_flinch_back.rfa", "rtgd_riotshield_flinchfront.rfa", "rtgd_riotshield_run.rfa",
+        "rtgd_riotshield_stand.rfa", "rtgd_riotshield_walk.rfa", "rtgd_riotshieldattackcrouch.rfa", "ult2_attack_crouch01.rfa",
+        "ult2_attack_run.rfa", "ult2_attack_stand.rfa", "ult2_attack_walk.rfa", "ult2_corpse_drop.rfa",
+        "ult2_corpsecarry_stand.rfa", "ult2_corpsecarry_walk.rfa", "ult2_cower.rfa", "ult2_crouch.rfa",
+        "ult2_Crouch_Death.rfa", "ult2_Death_blast_forwards.rfa", "ult2_Death_chest_backward.rfa", "ult2_Death_chest_forward.rfa",
+        "ult2_Death_Generic.rfa", "ult2_Death_head_forwards.rfa", "ult2_Death_leg_Left.rfa", "ult2_Death_leg_Right.rfa",
+        "ult2_draw.rfa", "ult2_firing_crouch.rfa", "ult2_firing_stand.rfa", "Ult2_flee_run.rfa",
+        "ult2_flinch_astand.rfa", "Ult2_Flinch_ChestB.rfa", "Ult2_Flinch_ChestF.rfa", "Ult2_Flinch_LegL.rfa",
+        "Ult2_Flinch_LegR.rfa", "ult2_flinch_stand.rfa", "ult2_idle_HitHead.rfa", "ult2_jump.rfa",
+        "ult2_reload.rfa", "ult2_run.rfa", "Ult2_run_flee_AR.rfa", "ult2_silencer.rfa",
+        "ult2_silencer_off.rfa", "ult2_stand.rfa", "ult2_walk.rfa",
+    ],
+    "guard2.v3c": [  # MP: guard2 / miner1, 189 anims
+        "engd_arifle_attack_crouch.rfa", "engd_arifle_attack_run.rfa", "engd_arifle_attack_stand.rfa", "engd_arifle_attack_walk.rfa",
+        "engd_arifle_reload.rfa", "engd_arifle_stand.rfa", "engd_arifle_stand_firing.rfa", "engd_arifle_stand_firing_2.rfa",
+        "engd_rl_attack_crouch.rfa", "engd_rl_attack_stand.rfa", "engd_rl_crouch_firing.rfa", "engd_rl_run.rfa",
+        "engd_rl_stand.rfa", "engd_rl_stand_firing.rfa", "engd_rl_walk.rfa", "engd_SAR_attack_crouch.rfa",
+        "engd_SAR_crouch_fire.rfa", "engd_SAR_stand_firing.rfa", "esgd_attack_crouch.rfa", "esgd_attack_run.rfa",
+        "esgd_attack_stand.rfa", "esgd_attack_walk.rfa", "esgd_firing_stand.rfa", "esgd_mp_reload.rfa",
+        "esgd_stand.rfa", "miner_corpse_carry.rfa", "miner_dead.rfa", "miner_talk.rfa",
+        "miner_talk_short.rfa", "park_Death_crouch.rfa", "park_Death_head_backwards.rfa", "park_ft_alt_fire_stand.rfa",
+        "park_ft_attack_crouch.rfa", "park_ft_attack_stand.rfa", "park_ft_crouch_fire.rfa", "park_ft_reload.rfa",
+        "park_ft_run.rfa", "park_ft_stand_fire.rfa", "park_ft_walk.rfa", "park_grenade_throw.rfa",
+        "park_grenade_throw_alt.rfa", "park_HG_crouch_walk.rfa", "park_hmac_attack_crouch.rfa", "park_hmac_attack_stand.rfa",
+        "park_hmac_crouch_fire.rfa", "park_hmac_crouch_walk.rfa", "park_hmac_idle.rfa", "park_hmac_reload.rfa",
+        "park_hmac_run.rfa", "park_hmac_stand.rfa", "park_hmac_stand_fire.rfa", "park_hmac_walk.rfa",
+        "park_jeep_driver.rfa", "park_jeep_gunner.rfa", "park_MP_crouch_walk.rfa", "park_remotecharge_throw.rfa",
+        "park_riotstick_crouch.rfa", "park_riotstick_crouch_swing.rfa", "park_riotstick_crouch_taser.rfa", "park_riotstick_reload.rfa",
+        "park_riotstick_stand.rfa", "park_riotstick_swing1.rfa", "park_riotstick_taser.rfa", "park_rrif_attack_crouch.rfa",
+        "park_rrif_attack_stand.rfa", "park_rrif_crouch_fire.rfa", "park_rrif_idle.rfa", "park_rrif_run.rfa",
+        "park_rrif_stand.rfa", "park_rrif_stand_fire.rfa", "park_rrif_walk.rfa", "park_Rshield_crouch_walk.rfa",
+        "park_Rstick_crouch_walk.rfa", "park_run.rfa", "park_run_flail.rfa", "park_run_flee_HMAC.rfa",
+        "park_SC_crouch_walk.rfa", "park_SG_crouch_walk.rfa", "park_shotgun_attack_stand.rfa", "park_shotgun_crouch.rfa",
+        "park_shotgun_crouchfireauto.rfa", "park_shotgun_crouchfirepump.rfa", "park_shotgun_reload.rfa", "park_shotgun_run.rfa",
+        "park_shotgun_stand.rfa", "park_shotgun_stand_fireauto.rfa", "park_shotgun_stand_firepump.rfa", "park_shotgun_walk.rfa",
+        "park_smw_crouch.rfa", "park_smw_crouch_fire.rfa", "park_smw_flinch_back.rfa", "park_smw_flinch_front.rfa",
+        "park_smw_idle.rfa", "park_smw_run.rfa", "park_smw_stand.rfa", "park_smw_stand_fire.rfa",
+        "park_smw_walk.rfa", "park_sniper_attack_crouch.rfa", "park_sniper_attack_stand.rfa", "park_sniper_crouch_fire.rfa",
+        "park_sniper_reload.rfa", "park_sniper_run.rfa", "park_sniper_stand.rfa", "park_sniper_stand_fire.rfa",
+        "park_sniper_walk.rfa", "park_swim_stand.rfa", "park_swim_walk.rfa", "rtgd_riotshield_attack.rfa",
+        "rtgd_riotshield_attackstand.rfa", "rtgd_riotshield_crouch.rfa", "rtgd_riotshield_flinch_back.rfa", "rtgd_riotshield_flinchfront.rfa",
+        "rtgd_riotshield_run.rfa", "rtgd_riotshield_stand.rfa", "rtgd_riotshield_walk.rfa", "rtgd_riotshieldattackcrouch.rfa",
+        "ult2_attack_crouch01.rfa", "ult2_attack_run.rfa", "ult2_attack_stand.rfa", "ult2_attack_walk.rfa",
+        "ult2_corpse_drop.rfa", "ult2_corpsecarry_stand.rfa", "ult2_corpsecarry_walk.rfa", "ult2_cower.rfa",
+        "ult2_crouch.rfa", "ult2_Death_blast_forwards.rfa", "ult2_Death_chest_backward.rfa", "ult2_Death_chest_forward.rfa",
+        "ult2_Death_Generic.rfa", "ult2_Death_head_forwards.rfa", "ult2_Death_leg_Left.rfa", "ult2_Death_leg_Right.rfa",
+        "ult2_draw.rfa", "ult2_firing_crouch.rfa", "ult2_firing_stand.rfa", "Ult2_flee_run.rfa",
+        "ult2_flinch_astand.rfa", "Ult2_Flinch_ChestB.rfa", "Ult2_Flinch_ChestF.rfa", "Ult2_Flinch_LegL.rfa",
+        "Ult2_Flinch_LegR.rfa", "ult2_flinch_stand.rfa", "ult2_idle_HitHead.rfa", "ult2_jump.rfa",
+        "ult2_reload.rfa", "ult2_run.rfa", "Ult2_run_flee_AR.rfa", "ult2_silencer.rfa",
+        "ult2_stand.rfa", "ult2_walk.rfa", "ult3_attack_run.rfa", "ult3_attack_stand.rfa",
+        "ult3_attack_walk.rfa", "ult3_corpse.rfa", "ult3_corpse2.rfa", "ult3_corpse3.rfa",
+        "ult3_corpse_drop.rfa", "ult3_cower.rfa", "ult3_crouch.rfa", "ult3_death_blast_backwards.rfa",
+        "ult3_death_blast_forwards.rfa", "Ult3_Death_Carry.rfa", "ult3_death_chest_backwards.rfa", "ult3_death_chest_forwards.rfa",
+        "ult3_death_crouch.rfa", "ult3_death_generic.rfa", "ult3_death_head_backward.rfa", "ult3_death_head_forward.rfa",
+        "ult3_death_leg_left.rfa", "ult3_firing_stand.rfa", "ult3_flinch_back.rfa", "ult3_flinch_chest.rfa",
+        "ult3_flinch_leg_left.rfa", "ult3_flinch_leg_right.rfa", "ult3_hit_alarm.rfa", "ult3_idle_handstretch.rfa",
+        "ult3_idle_legscratch.rfa", "ult3_idle_radarlook.rfa", "ult3_jump.rfa", "ult3_reload.rfa",
+        "ult3_run.rfa", "ult3_run_flail.rfa", "Ult3_run_flee_AR.rfa", "Ult3_sidestep_left.rfa",
+        "Ult3_sidestep_right.rfa", "ult3_stand.rfa", "ult3_talk.rfa", "ult3_talk_short.rfa",
+        "ult3_walk.rfa",
+    ],
+    "multi_guard2.v3c": [  # MP: guard2 / miner1, 189 anims
+        "engd_arifle_attack_crouch.rfa", "engd_arifle_attack_run.rfa", "engd_arifle_attack_stand.rfa", "engd_arifle_attack_walk.rfa",
+        "engd_arifle_reload.rfa", "engd_arifle_stand.rfa", "engd_arifle_stand_firing.rfa", "engd_arifle_stand_firing_2.rfa",
+        "engd_rl_attack_crouch.rfa", "engd_rl_attack_stand.rfa", "engd_rl_crouch_firing.rfa", "engd_rl_run.rfa",
+        "engd_rl_stand.rfa", "engd_rl_stand_firing.rfa", "engd_rl_walk.rfa", "engd_SAR_attack_crouch.rfa",
+        "engd_SAR_crouch_fire.rfa", "engd_SAR_stand_firing.rfa", "esgd_attack_crouch.rfa", "esgd_attack_run.rfa",
+        "esgd_attack_stand.rfa", "esgd_attack_walk.rfa", "esgd_firing_stand.rfa", "esgd_mp_reload.rfa",
+        "esgd_stand.rfa", "miner_corpse_carry.rfa", "miner_dead.rfa", "miner_talk.rfa",
+        "miner_talk_short.rfa", "park_Death_crouch.rfa", "park_Death_head_backwards.rfa", "park_ft_alt_fire_stand.rfa",
+        "park_ft_attack_crouch.rfa", "park_ft_attack_stand.rfa", "park_ft_crouch_fire.rfa", "park_ft_reload.rfa",
+        "park_ft_run.rfa", "park_ft_stand_fire.rfa", "park_ft_walk.rfa", "park_grenade_throw.rfa",
+        "park_grenade_throw_alt.rfa", "park_HG_crouch_walk.rfa", "park_hmac_attack_crouch.rfa", "park_hmac_attack_stand.rfa",
+        "park_hmac_crouch_fire.rfa", "park_hmac_crouch_walk.rfa", "park_hmac_idle.rfa", "park_hmac_reload.rfa",
+        "park_hmac_run.rfa", "park_hmac_stand.rfa", "park_hmac_stand_fire.rfa", "park_hmac_walk.rfa",
+        "park_jeep_driver.rfa", "park_jeep_gunner.rfa", "park_MP_crouch_walk.rfa", "park_remotecharge_throw.rfa",
+        "park_riotstick_crouch.rfa", "park_riotstick_crouch_swing.rfa", "park_riotstick_crouch_taser.rfa", "park_riotstick_reload.rfa",
+        "park_riotstick_stand.rfa", "park_riotstick_swing1.rfa", "park_riotstick_taser.rfa", "park_rrif_attack_crouch.rfa",
+        "park_rrif_attack_stand.rfa", "park_rrif_crouch_fire.rfa", "park_rrif_idle.rfa", "park_rrif_run.rfa",
+        "park_rrif_stand.rfa", "park_rrif_stand_fire.rfa", "park_rrif_walk.rfa", "park_Rshield_crouch_walk.rfa",
+        "park_Rstick_crouch_walk.rfa", "park_run.rfa", "park_run_flail.rfa", "park_run_flee_HMAC.rfa",
+        "park_SC_crouch_walk.rfa", "park_SG_crouch_walk.rfa", "park_shotgun_attack_stand.rfa", "park_shotgun_crouch.rfa",
+        "park_shotgun_crouchfireauto.rfa", "park_shotgun_crouchfirepump.rfa", "park_shotgun_reload.rfa", "park_shotgun_run.rfa",
+        "park_shotgun_stand.rfa", "park_shotgun_stand_fireauto.rfa", "park_shotgun_stand_firepump.rfa", "park_shotgun_walk.rfa",
+        "park_smw_crouch.rfa", "park_smw_crouch_fire.rfa", "park_smw_flinch_back.rfa", "park_smw_flinch_front.rfa",
+        "park_smw_idle.rfa", "park_smw_run.rfa", "park_smw_stand.rfa", "park_smw_stand_fire.rfa",
+        "park_smw_walk.rfa", "park_sniper_attack_crouch.rfa", "park_sniper_attack_stand.rfa", "park_sniper_crouch_fire.rfa",
+        "park_sniper_reload.rfa", "park_sniper_run.rfa", "park_sniper_stand.rfa", "park_sniper_stand_fire.rfa",
+        "park_sniper_walk.rfa", "park_swim_stand.rfa", "park_swim_walk.rfa", "rtgd_riotshield_attack.rfa",
+        "rtgd_riotshield_attackstand.rfa", "rtgd_riotshield_crouch.rfa", "rtgd_riotshield_flinch_back.rfa", "rtgd_riotshield_flinchfront.rfa",
+        "rtgd_riotshield_run.rfa", "rtgd_riotshield_stand.rfa", "rtgd_riotshield_walk.rfa", "rtgd_riotshieldattackcrouch.rfa",
+        "ult2_attack_crouch01.rfa", "ult2_attack_run.rfa", "ult2_attack_stand.rfa", "ult2_attack_walk.rfa",
+        "ult2_corpse_drop.rfa", "ult2_corpsecarry_stand.rfa", "ult2_corpsecarry_walk.rfa", "ult2_cower.rfa",
+        "ult2_crouch.rfa", "ult2_Death_blast_forwards.rfa", "ult2_Death_chest_backward.rfa", "ult2_Death_chest_forward.rfa",
+        "ult2_Death_Generic.rfa", "ult2_Death_head_forwards.rfa", "ult2_Death_leg_Left.rfa", "ult2_Death_leg_Right.rfa",
+        "ult2_draw.rfa", "ult2_firing_crouch.rfa", "ult2_firing_stand.rfa", "Ult2_flee_run.rfa",
+        "ult2_flinch_astand.rfa", "Ult2_Flinch_ChestB.rfa", "Ult2_Flinch_ChestF.rfa", "Ult2_Flinch_LegL.rfa",
+        "Ult2_Flinch_LegR.rfa", "ult2_flinch_stand.rfa", "ult2_idle_HitHead.rfa", "ult2_jump.rfa",
+        "ult2_reload.rfa", "ult2_run.rfa", "Ult2_run_flee_AR.rfa", "ult2_silencer.rfa",
+        "ult2_stand.rfa", "ult2_walk.rfa", "ult3_attack_run.rfa", "ult3_attack_stand.rfa",
+        "ult3_attack_walk.rfa", "ult3_corpse.rfa", "ult3_corpse2.rfa", "ult3_corpse3.rfa",
+        "ult3_corpse_drop.rfa", "ult3_cower.rfa", "ult3_crouch.rfa", "ult3_death_blast_backwards.rfa",
+        "ult3_death_blast_forwards.rfa", "Ult3_Death_Carry.rfa", "ult3_death_chest_backwards.rfa", "ult3_death_chest_forwards.rfa",
+        "ult3_death_crouch.rfa", "ult3_death_generic.rfa", "ult3_death_head_backward.rfa", "ult3_death_head_forward.rfa",
+        "ult3_death_leg_left.rfa", "ult3_firing_stand.rfa", "ult3_flinch_back.rfa", "ult3_flinch_chest.rfa",
+        "ult3_flinch_leg_left.rfa", "ult3_flinch_leg_right.rfa", "ult3_hit_alarm.rfa", "ult3_idle_handstretch.rfa",
+        "ult3_idle_legscratch.rfa", "ult3_idle_radarlook.rfa", "ult3_jump.rfa", "ult3_reload.rfa",
+        "ult3_run.rfa", "ult3_run_flail.rfa", "Ult3_run_flee_AR.rfa", "Ult3_sidestep_left.rfa",
+        "Ult3_sidestep_right.rfa", "ult3_stand.rfa", "ult3_talk.rfa", "ult3_talk_short.rfa",
+        "ult3_walk.rfa",
+    ],
+    "env_guard.v3c": [  # MP: env_guard / miner1, 168 anims
+        "engd_arifle_attack_crouch.rfa", "engd_arifle_attack_run.rfa", "engd_arifle_attack_stand.rfa", "engd_arifle_attack_walk.rfa",
+        "engd_arifle_reload.rfa", "engd_arifle_stand.rfa", "engd_arifle_stand_firing.rfa", "engd_arifle_stand_firing_2.rfa",
+        "engd_rl_attack_crouch.rfa", "engd_rl_attack_stand.rfa", "engd_rl_crouch_firing.rfa", "engd_rl_run.rfa",
+        "engd_rl_stand.rfa", "engd_rl_stand_firing.rfa", "engd_rl_walk.rfa", "engd_SAR_attack_crouch.rfa",
+        "engd_SAR_crouch_fire.rfa", "engd_SAR_stand_firing.rfa", "engd_talk.rfa", "engd_talk_short.rfa",
+        "esgd_attack_crouch.rfa", "esgd_attack_run.rfa", "esgd_attack_stand.rfa", "esgd_attack_walk.rfa",
+        "esgd_firing_stand.rfa", "esgd_mp_reload.rfa", "esgd_stand.rfa", "miner_corpse_carry.rfa",
+        "miner_dead.rfa", "miner_talk.rfa", "miner_talk_short.rfa", "park_Death_crouch.rfa",
+        "park_Death_head_backwards.rfa", "park_ft_alt_fire_stand.rfa", "park_ft_attack_crouch.rfa", "park_ft_attack_stand.rfa",
+        "park_ft_crouch_fire.rfa", "park_ft_reload.rfa", "park_ft_run.rfa", "park_ft_stand_fire.rfa",
+        "park_ft_walk.rfa", "park_grenade_throw.rfa", "park_grenade_throw_alt.rfa", "park_HG_crouch_walk.rfa",
+        "park_hmac_attack_crouch.rfa", "park_hmac_attack_stand.rfa", "park_hmac_crouch_fire.rfa", "park_hmac_crouch_walk.rfa",
+        "park_hmac_idle.rfa", "park_hmac_reload.rfa", "park_hmac_run.rfa", "park_hmac_stand.rfa",
+        "park_hmac_stand_fire.rfa", "park_hmac_walk.rfa", "park_jeep_driver.rfa", "park_jeep_gunner.rfa",
+        "park_MP_crouch_walk.rfa", "park_remotecharge_throw.rfa", "park_riotstick_crouch.rfa", "park_riotstick_crouch_swing.rfa",
+        "park_riotstick_crouch_taser.rfa", "park_riotstick_reload.rfa", "park_riotstick_stand.rfa", "park_riotstick_swing1.rfa",
+        "park_riotstick_taser.rfa", "park_rrif_attack_crouch.rfa", "park_rrif_attack_stand.rfa", "park_rrif_crouch_fire.rfa",
+        "park_rrif_idle.rfa", "park_rrif_run.rfa", "park_rrif_stand.rfa", "park_rrif_stand_fire.rfa",
+        "park_rrif_walk.rfa", "park_Rshield_crouch_walk.rfa", "park_Rstick_crouch_walk.rfa", "park_run.rfa",
+        "park_run_flail.rfa", "park_run_flee_HMAC.rfa", "park_SC_crouch_walk.rfa", "park_SG_crouch_walk.rfa",
+        "park_shotgun_attack_stand.rfa", "park_shotgun_crouch.rfa", "park_shotgun_crouchfireauto.rfa", "park_shotgun_crouchfirepump.rfa",
+        "park_shotgun_reload.rfa", "park_shotgun_run.rfa", "park_shotgun_stand.rfa", "park_shotgun_stand_fireauto.rfa",
+        "park_shotgun_stand_firepump.rfa", "park_shotgun_walk.rfa", "park_smw_crouch.rfa", "park_smw_crouch_fire.rfa",
+        "park_smw_flinch_back.rfa", "park_smw_flinch_front.rfa", "park_smw_idle.rfa", "park_smw_run.rfa",
+        "park_smw_stand.rfa", "park_smw_stand_fire.rfa", "park_smw_walk.rfa", "park_sniper_attack_crouch.rfa",
+        "park_sniper_attack_stand.rfa", "park_sniper_crouch_fire.rfa", "park_sniper_reload.rfa", "park_sniper_run.rfa",
+        "park_sniper_stand.rfa", "park_sniper_stand_fire.rfa", "park_sniper_walk.rfa", "park_swim_stand.rfa",
+        "park_swim_walk.rfa", "rtgd_riotshield_attack.rfa", "rtgd_riotshield_attackstand.rfa", "rtgd_riotshield_crouch.rfa",
+        "rtgd_riotshield_flinch_back.rfa", "rtgd_riotshield_flinchfront.rfa", "rtgd_riotshield_run.rfa", "rtgd_riotshield_stand.rfa",
+        "rtgd_riotshield_walk.rfa", "rtgd_riotshieldattackcrouch.rfa", "ult2_attack_crouch01.rfa", "ult2_attack_run.rfa",
+        "ult2_attack_stand.rfa", "ult2_attack_walk.rfa", "ult2_corpse.rfa", "ult2_corpse2.rfa",
+        "ult2_corpse3.rfa", "ult2_corpse_drop.rfa", "ult2_corpsecarry_stand.rfa", "ult2_corpsecarry_walk.rfa",
+        "ult2_cower.rfa", "ult2_crouch.rfa", "ult2_Crouch_Death.rfa", "ult2_Death_blast_forwards.rfa",
+        "Ult2_Death_Carry.rfa", "ult2_Death_chest_backward.rfa", "ult2_Death_chest_forward.rfa", "ult2_Death_Generic.rfa",
+        "ult2_Death_head_backwards.rfa", "ult2_Death_head_forwards.rfa", "ult2_Death_leg_Left.rfa", "ult2_Death_leg_Right.rfa",
+        "ult2_draw.rfa", "ult2_firing_crouch.rfa", "ult2_firing_stand.rfa", "Ult2_flee_run.rfa",
+        "ult2_flinch_astand.rfa", "Ult2_Flinch_ChestB.rfa", "ult2_Flinch_ChestB.rfa", "ult2_Flinch_ChestF.rfa",
+        "Ult2_Flinch_ChestF.rfa", "Ult2_Flinch_LegL.rfa", "ult2_Flinch_LegL.rfa", "ult2_Flinch_LegR.rfa",
+        "Ult2_Flinch_LegR.rfa", "ult2_flinch_stand.rfa", "ult2_hit_alarm.rfa", "ult2_idle_HitHead.rfa",
+        "ult2_idle_look.rfa", "ult2_idle_stretch.rfa", "ult2_jump.rfa", "ult2_on_turret.rfa",
+        "ult2_reload.rfa", "ult2_run.rfa", "Ult2_run_flee_AR.rfa", "ult2_sidestep_left.rfa",
+        "ult2_sidestep_right.rfa", "ult2_silencer.rfa", "ult2_stand.rfa", "ult2_walk.rfa",
+    ],
+    "elite.v3c": [  # MP: elite / miner1, 170 anims
+        "engd_arifle_attack_crouch.rfa", "engd_arifle_attack_run.rfa", "engd_arifle_attack_stand.rfa", "engd_arifle_attack_walk.rfa",
+        "engd_arifle_reload.rfa", "engd_arifle_stand.rfa", "engd_arifle_stand_firing.rfa", "engd_arifle_stand_firing_2.rfa",
+        "engd_rl_attack_crouch.rfa", "engd_rl_attack_stand.rfa", "engd_rl_crouch_firing.rfa", "engd_rl_run.rfa",
+        "engd_rl_stand.rfa", "engd_rl_stand_firing.rfa", "engd_rl_walk.rfa", "engd_SAR_attack_crouch.rfa",
+        "engd_SAR_crouch_fire.rfa", "engd_SAR_stand_firing.rfa", "esgd_attack_crouch.rfa", "esgd_attack_roll_left.rfa",
+        "esgd_attack_roll_right.rfa", "esgd_attack_run.rfa", "esgd_attack_stand.rfa", "esgd_attack_walk.rfa",
+        "esgd_firing_stand.rfa", "esgd_mp_reload.rfa", "esgd_stand.rfa", "esgd_talk.rfa",
+        "esgd_talk_short.rfa", "miner_corpse_carry.rfa", "miner_dead.rfa", "miner_talk.rfa",
+        "miner_talk_short.rfa", "park_Death_crouch.rfa", "park_Death_head_backwards.rfa", "park_ft_alt_fire_stand.rfa",
+        "park_ft_attack_crouch.rfa", "park_ft_attack_stand.rfa", "park_ft_crouch_fire.rfa", "park_ft_reload.rfa",
+        "park_ft_run.rfa", "park_ft_stand_fire.rfa", "park_ft_walk.rfa", "park_grenade_throw.rfa",
+        "park_grenade_throw_alt.rfa", "park_HG_crouch_walk.rfa", "park_hmac_attack_crouch.rfa", "park_hmac_attack_stand.rfa",
+        "park_hmac_crouch_fire.rfa", "park_hmac_crouch_walk.rfa", "park_hmac_idle.rfa", "park_hmac_reload.rfa",
+        "park_hmac_run.rfa", "park_hmac_stand.rfa", "park_hmac_stand_fire.rfa", "park_hmac_walk.rfa",
+        "park_jeep_driver.rfa", "park_jeep_gunner.rfa", "park_MP_crouch_walk.rfa", "park_remotecharge_throw.rfa",
+        "park_riotstick_crouch.rfa", "park_riotstick_crouch_swing.rfa", "park_riotstick_crouch_taser.rfa", "park_riotstick_reload.rfa",
+        "park_riotstick_stand.rfa", "park_riotstick_swing1.rfa", "park_riotstick_taser.rfa", "park_rrif_attack_crouch.rfa",
+        "park_rrif_attack_stand.rfa", "park_rrif_crouch_fire.rfa", "park_rrif_idle.rfa", "park_rrif_run.rfa",
+        "park_rrif_stand.rfa", "park_rrif_stand_fire.rfa", "park_rrif_walk.rfa", "park_Rshield_crouch_walk.rfa",
+        "park_Rstick_crouch_walk.rfa", "park_run.rfa", "park_run_flail.rfa", "park_run_flee_HMAC.rfa",
+        "park_SC_crouch_walk.rfa", "park_SG_crouch_walk.rfa", "park_shotgun_attack_stand.rfa", "park_shotgun_crouch.rfa",
+        "park_shotgun_crouchfireauto.rfa", "park_shotgun_crouchfirepump.rfa", "park_shotgun_reload.rfa", "park_shotgun_run.rfa",
+        "park_shotgun_stand.rfa", "park_shotgun_stand_fireauto.rfa", "park_shotgun_stand_firepump.rfa", "park_shotgun_walk.rfa",
+        "park_smw_crouch.rfa", "park_smw_crouch_fire.rfa", "park_smw_flinch_back.rfa", "park_smw_flinch_front.rfa",
+        "park_smw_idle.rfa", "park_smw_run.rfa", "park_smw_stand.rfa", "park_smw_stand_fire.rfa",
+        "park_smw_walk.rfa", "park_sniper_attack_crouch.rfa", "park_sniper_attack_stand.rfa", "park_sniper_crouch_fire.rfa",
+        "park_sniper_reload.rfa", "park_sniper_run.rfa", "park_sniper_stand.rfa", "park_sniper_stand_fire.rfa",
+        "park_sniper_walk.rfa", "park_swim_stand.rfa", "park_swim_walk.rfa", "rtgd_riotshield_attack.rfa",
+        "rtgd_riotshield_attackstand.rfa", "rtgd_riotshield_crouch.rfa", "rtgd_riotshield_flinch_back.rfa", "rtgd_riotshield_flinchfront.rfa",
+        "rtgd_riotshield_run.rfa", "rtgd_riotshield_stand.rfa", "rtgd_riotshield_walk.rfa", "rtgd_riotshieldattackcrouch.rfa",
+        "ult2_attack_crouch01.rfa", "ult2_attack_run.rfa", "ult2_attack_stand.rfa", "ult2_attack_walk.rfa",
+        "ult2_corpse.rfa", "ult2_corpse2.rfa", "ult2_corpse3.rfa", "ult2_corpse_drop.rfa",
+        "ult2_corpsecarry_stand.rfa", "ult2_corpsecarry_walk.rfa", "ult2_cower.rfa", "ult2_crouch.rfa",
+        "ult2_Crouch_Death.rfa", "ult2_Death_blast_forwards.rfa", "Ult2_Death_Carry.rfa", "ult2_Death_chest_backward.rfa",
+        "ult2_Death_chest_forward.rfa", "ult2_Death_Generic.rfa", "ult2_Death_head_backwards.rfa", "ult2_Death_head_forwards.rfa",
+        "ult2_Death_leg_Left.rfa", "ult2_Death_leg_Right.rfa", "ult2_draw.rfa", "ult2_firing_crouch.rfa",
+        "ult2_firing_stand.rfa", "Ult2_flee_run.rfa", "ult2_flinch_astand.rfa", "Ult2_Flinch_ChestB.rfa",
+        "ult2_Flinch_ChestB.rfa", "ult2_Flinch_ChestF.rfa", "Ult2_Flinch_ChestF.rfa", "Ult2_Flinch_LegL.rfa",
+        "ult2_Flinch_LegL.rfa", "ult2_Flinch_LegR.rfa", "Ult2_Flinch_LegR.rfa", "ult2_flinch_stand.rfa",
+        "ult2_hit_alarm.rfa", "ult2_idle_HitHead.rfa", "ult2_idle_look.rfa", "ult2_idle_stretch.rfa",
+        "ult2_jump.rfa", "ult2_on_turret.rfa", "ult2_reload.rfa", "ult2_run.rfa",
+        "Ult2_run_flee_AR.rfa", "ult2_sidestep_left.rfa", "ult2_sidestep_right.rfa", "ult2_silencer.rfa",
+        "ult2_stand.rfa", "ult2_walk.rfa",
+    ],
+    "ult2_guard.v3c": [  # MP: elite / miner1, 170 anims
+        "engd_arifle_attack_crouch.rfa", "engd_arifle_attack_run.rfa", "engd_arifle_attack_stand.rfa", "engd_arifle_attack_walk.rfa",
+        "engd_arifle_reload.rfa", "engd_arifle_stand.rfa", "engd_arifle_stand_firing.rfa", "engd_arifle_stand_firing_2.rfa",
+        "engd_rl_attack_crouch.rfa", "engd_rl_attack_stand.rfa", "engd_rl_crouch_firing.rfa", "engd_rl_run.rfa",
+        "engd_rl_stand.rfa", "engd_rl_stand_firing.rfa", "engd_rl_walk.rfa", "engd_SAR_attack_crouch.rfa",
+        "engd_SAR_crouch_fire.rfa", "engd_SAR_stand_firing.rfa", "esgd_attack_crouch.rfa", "esgd_attack_roll_left.rfa",
+        "esgd_attack_roll_right.rfa", "esgd_attack_run.rfa", "esgd_attack_stand.rfa", "esgd_attack_walk.rfa",
+        "esgd_firing_stand.rfa", "esgd_mp_reload.rfa", "esgd_stand.rfa", "esgd_talk.rfa",
+        "esgd_talk_short.rfa", "miner_corpse_carry.rfa", "miner_dead.rfa", "miner_talk.rfa",
+        "miner_talk_short.rfa", "park_Death_crouch.rfa", "park_Death_head_backwards.rfa", "park_ft_alt_fire_stand.rfa",
+        "park_ft_attack_crouch.rfa", "park_ft_attack_stand.rfa", "park_ft_crouch_fire.rfa", "park_ft_reload.rfa",
+        "park_ft_run.rfa", "park_ft_stand_fire.rfa", "park_ft_walk.rfa", "park_grenade_throw.rfa",
+        "park_grenade_throw_alt.rfa", "park_HG_crouch_walk.rfa", "park_hmac_attack_crouch.rfa", "park_hmac_attack_stand.rfa",
+        "park_hmac_crouch_fire.rfa", "park_hmac_crouch_walk.rfa", "park_hmac_idle.rfa", "park_hmac_reload.rfa",
+        "park_hmac_run.rfa", "park_hmac_stand.rfa", "park_hmac_stand_fire.rfa", "park_hmac_walk.rfa",
+        "park_jeep_driver.rfa", "park_jeep_gunner.rfa", "park_MP_crouch_walk.rfa", "park_remotecharge_throw.rfa",
+        "park_riotstick_crouch.rfa", "park_riotstick_crouch_swing.rfa", "park_riotstick_crouch_taser.rfa", "park_riotstick_reload.rfa",
+        "park_riotstick_stand.rfa", "park_riotstick_swing1.rfa", "park_riotstick_taser.rfa", "park_rrif_attack_crouch.rfa",
+        "park_rrif_attack_stand.rfa", "park_rrif_crouch_fire.rfa", "park_rrif_idle.rfa", "park_rrif_run.rfa",
+        "park_rrif_stand.rfa", "park_rrif_stand_fire.rfa", "park_rrif_walk.rfa", "park_Rshield_crouch_walk.rfa",
+        "park_Rstick_crouch_walk.rfa", "park_run.rfa", "park_run_flail.rfa", "park_run_flee_HMAC.rfa",
+        "park_SC_crouch_walk.rfa", "park_SG_crouch_walk.rfa", "park_shotgun_attack_stand.rfa", "park_shotgun_crouch.rfa",
+        "park_shotgun_crouchfireauto.rfa", "park_shotgun_crouchfirepump.rfa", "park_shotgun_reload.rfa", "park_shotgun_run.rfa",
+        "park_shotgun_stand.rfa", "park_shotgun_stand_fireauto.rfa", "park_shotgun_stand_firepump.rfa", "park_shotgun_walk.rfa",
+        "park_smw_crouch.rfa", "park_smw_crouch_fire.rfa", "park_smw_flinch_back.rfa", "park_smw_flinch_front.rfa",
+        "park_smw_idle.rfa", "park_smw_run.rfa", "park_smw_stand.rfa", "park_smw_stand_fire.rfa",
+        "park_smw_walk.rfa", "park_sniper_attack_crouch.rfa", "park_sniper_attack_stand.rfa", "park_sniper_crouch_fire.rfa",
+        "park_sniper_reload.rfa", "park_sniper_run.rfa", "park_sniper_stand.rfa", "park_sniper_stand_fire.rfa",
+        "park_sniper_walk.rfa", "park_swim_stand.rfa", "park_swim_walk.rfa", "rtgd_riotshield_attack.rfa",
+        "rtgd_riotshield_attackstand.rfa", "rtgd_riotshield_crouch.rfa", "rtgd_riotshield_flinch_back.rfa", "rtgd_riotshield_flinchfront.rfa",
+        "rtgd_riotshield_run.rfa", "rtgd_riotshield_stand.rfa", "rtgd_riotshield_walk.rfa", "rtgd_riotshieldattackcrouch.rfa",
+        "ult2_attack_crouch01.rfa", "ult2_attack_run.rfa", "ult2_attack_stand.rfa", "ult2_attack_walk.rfa",
+        "ult2_corpse.rfa", "ult2_corpse2.rfa", "ult2_corpse3.rfa", "ult2_corpse_drop.rfa",
+        "ult2_corpsecarry_stand.rfa", "ult2_corpsecarry_walk.rfa", "ult2_cower.rfa", "ult2_crouch.rfa",
+        "ult2_Crouch_Death.rfa", "ult2_Death_blast_forwards.rfa", "Ult2_Death_Carry.rfa", "ult2_Death_chest_backward.rfa",
+        "ult2_Death_chest_forward.rfa", "ult2_Death_Generic.rfa", "ult2_Death_head_backwards.rfa", "ult2_Death_head_forwards.rfa",
+        "ult2_Death_leg_Left.rfa", "ult2_Death_leg_Right.rfa", "ult2_draw.rfa", "ult2_firing_crouch.rfa",
+        "ult2_firing_stand.rfa", "Ult2_flee_run.rfa", "ult2_flinch_astand.rfa", "Ult2_Flinch_ChestB.rfa",
+        "ult2_Flinch_ChestB.rfa", "ult2_Flinch_ChestF.rfa", "Ult2_Flinch_ChestF.rfa", "Ult2_Flinch_LegL.rfa",
+        "ult2_Flinch_LegL.rfa", "ult2_Flinch_LegR.rfa", "Ult2_Flinch_LegR.rfa", "ult2_flinch_stand.rfa",
+        "ult2_hit_alarm.rfa", "ult2_idle_HitHead.rfa", "ult2_idle_look.rfa", "ult2_idle_stretch.rfa",
+        "ult2_jump.rfa", "ult2_on_turret.rfa", "ult2_reload.rfa", "ult2_run.rfa",
+        "Ult2_run_flee_AR.rfa", "ult2_sidestep_left.rfa", "ult2_sidestep_right.rfa", "ult2_silencer.rfa",
+        "ult2_stand.rfa", "ult2_walk.rfa",
+    ],
+    "riot_guard.v3c": [  # MP: riot_guard / miner1, 155 anims
+        "engd_arifle_attack_crouch.rfa", "engd_arifle_attack_run.rfa", "engd_arifle_attack_stand.rfa", "engd_arifle_attack_walk.rfa",
+        "engd_arifle_reload.rfa", "engd_arifle_stand.rfa", "engd_arifle_stand_firing.rfa", "engd_arifle_stand_firing_2.rfa",
+        "engd_rl_attack_crouch.rfa", "engd_rl_attack_stand.rfa", "engd_rl_crouch_firing.rfa", "engd_rl_run.rfa",
+        "engd_rl_stand.rfa", "engd_rl_stand_firing.rfa", "engd_rl_walk.rfa", "engd_SAR_attack_crouch.rfa",
+        "engd_SAR_crouch_fire.rfa", "engd_SAR_stand_firing.rfa", "esgd_attack_crouch.rfa", "esgd_attack_run.rfa",
+        "esgd_attack_stand.rfa", "esgd_attack_walk.rfa", "esgd_firing_stand.rfa", "esgd_mp_reload.rfa",
+        "esgd_stand.rfa", "miner_corpse_carry.rfa", "miner_dead.rfa", "miner_talk.rfa",
+        "miner_talk_short.rfa", "park_Death_crouch.rfa", "park_Death_head_backwards.rfa", "park_ft_alt_fire_stand.rfa",
+        "park_ft_attack_crouch.rfa", "park_ft_attack_stand.rfa", "park_ft_crouch_fire.rfa", "park_ft_reload.rfa",
+        "park_ft_run.rfa", "park_ft_stand_fire.rfa", "park_ft_walk.rfa", "park_grenade_throw.rfa",
+        "park_grenade_throw_alt.rfa", "park_HG_crouch_walk.rfa", "park_hmac_attack_crouch.rfa", "park_hmac_attack_stand.rfa",
+        "park_hmac_crouch_fire.rfa", "park_hmac_crouch_walk.rfa", "park_hmac_idle.rfa", "park_hmac_reload.rfa",
+        "park_hmac_run.rfa", "park_hmac_stand.rfa", "park_hmac_stand_fire.rfa", "park_hmac_walk.rfa",
+        "park_jeep_driver.rfa", "park_jeep_gunner.rfa", "park_MP_crouch_walk.rfa", "park_remotecharge_throw.rfa",
+        "park_riotstick_crouch.rfa", "park_riotstick_crouch_swing.rfa", "park_riotstick_crouch_taser.rfa", "park_riotstick_reload.rfa",
+        "park_riotstick_stand.rfa", "park_riotstick_swing1.rfa", "park_riotstick_taser.rfa", "park_rrif_attack_crouch.rfa",
+        "park_rrif_attack_stand.rfa", "park_rrif_crouch_fire.rfa", "park_rrif_idle.rfa", "park_rrif_run.rfa",
+        "park_rrif_stand.rfa", "park_rrif_stand_fire.rfa", "park_rrif_walk.rfa", "park_Rshield_crouch_walk.rfa",
+        "park_Rstick_crouch_walk.rfa", "park_run.rfa", "park_run_flail.rfa", "park_run_flee_HMAC.rfa",
+        "park_SC_crouch_walk.rfa", "park_SG_crouch_walk.rfa", "park_shotgun_attack_stand.rfa", "park_shotgun_crouch.rfa",
+        "park_shotgun_crouchfireauto.rfa", "park_shotgun_crouchfirepump.rfa", "park_shotgun_reload.rfa", "park_shotgun_run.rfa",
+        "park_shotgun_stand.rfa", "park_shotgun_stand_fireauto.rfa", "park_shotgun_stand_firepump.rfa", "park_shotgun_walk.rfa",
+        "park_smw_crouch.rfa", "park_smw_crouch_fire.rfa", "park_smw_flinch_back.rfa", "park_smw_flinch_front.rfa",
+        "park_smw_idle.rfa", "park_smw_run.rfa", "park_smw_stand.rfa", "park_smw_stand_fire.rfa",
+        "park_smw_walk.rfa", "park_sniper_attack_crouch.rfa", "park_sniper_attack_stand.rfa", "park_sniper_crouch_fire.rfa",
+        "park_sniper_reload.rfa", "park_sniper_run.rfa", "park_sniper_stand.rfa", "park_sniper_stand_fire.rfa",
+        "park_sniper_walk.rfa", "park_swim_stand.rfa", "park_swim_walk.rfa", "rtgd_riotshield_attack.rfa",
+        "rtgd_riotshield_attackstand.rfa", "rtgd_riotshield_crouch.rfa", "rtgd_riotshield_flinch_back.rfa", "rtgd_riotshield_flinchfront.rfa",
+        "rtgd_riotshield_run.rfa", "rtgd_riotshield_stand.rfa", "rtgd_riotshield_walk.rfa", "rtgd_riotshieldattackcrouch.rfa",
+        "ult2_attack_crouch01.rfa", "ult2_attack_run.rfa", "ult2_attack_stand.rfa", "ult2_attack_walk.rfa",
+        "ult2_corpse_drop.rfa", "ult2_corpsecarry_stand.rfa", "ult2_corpsecarry_walk.rfa", "ult2_cower.rfa",
+        "ult2_crouch.rfa", "ult2_Crouch_Death.rfa", "ult2_Death_blast_backwards.rfa", "ult2_Death_blast_forwards.rfa",
+        "ult2_Death_chest_backward.rfa", "ult2_Death_chest_forward.rfa", "ult2_Death_Generic.rfa", "ult2_Death_head_forwards.rfa",
+        "ult2_Death_leg_Left.rfa", "ult2_Death_leg_Right.rfa", "ult2_draw.rfa", "ult2_firing_crouch.rfa",
+        "ult2_firing_stand.rfa", "Ult2_flee_run.rfa", "ult2_flinch_astand.rfa", "Ult2_Flinch_ChestB.rfa",
+        "Ult2_Flinch_ChestF.rfa", "Ult2_Flinch_LegL.rfa", "Ult2_Flinch_LegR.rfa", "ult2_flinch_stand.rfa",
+        "ult2_hit_alarm.rfa", "ult2_idle_HitHead.rfa", "ult2_jump.rfa", "ult2_reload.rfa",
+        "ult2_run.rfa", "Ult2_run_flee_AR.rfa", "ult2_sidestep_left.rfa", "ult2_sidestep_right.rfa",
+        "ult2_silencer.rfa", "ult2_stand.rfa", "ult2_walk.rfa",
+    ],
+    "nurse1.v3c": [  # MP: nurse / multi_female, 129 anims
+        "ADFM_cower.rfa", "ADFM_crouch.rfa", "ADFM_death_blast_backwards.rfa", "ADFM_death_blast_forwards.rfa",
+        "ADFM_death_chest_backwards.rfa", "ADFM_death_chest_forwards.rfa", "ADFM_death_crouch.rfa", "ADFM_death_generic.rfa",
+        "ADFM_death_head_backwards.rfa", "ADFM_death_head_forwards.rfa", "ADFM_death_leg_left.rfa", "ADFM_death_leg_right.rfa",
+        "ADFM_flinch_back.rfa", "ADFM_flinch_chest.rfa", "ADFM_flinch_leg_left.rfa", "ADFM_flinch_leg_right.rfa",
+        "ADFM_freefall.rfa", "ADFM_hit_alarm.rfa", "adfm_run_flail.rfa", "admin_fem_corpsecarry.rfa",
+        "admin_fem_corpsedrop.rfa", "admin_fem_idle01.rfa", "admin_fem_run.rfa", "admin_fem_run_flee.rfa",
+        "admin_fem_stand.rfa", "admin_fem_walk.rfa", "masa_sar_attack_crouch.rfa", "masa_sar_attack_stand.rfa",
+        "masa_sar_crouch_fire.rfa", "masa_sar_reload.rfa", "masa_sar_run.rfa", "masa_sar_stand_fire.rfa",
+        "masa_sar_walk.rfa", "mnr3f_12mm_crouch.rfa", "mnr3f_12mm_crouch_walk.rfa", "mnr3f_12mm_fire.rfa",
+        "mnr3f_12mm_reload.rfa", "mnr3f_12mm_run.rfa", "mnr3f_12mm_stand.rfa", "mnr3f_12mm_walk.rfa",
+        "mnr3f_AR_crouch.rfa", "mnr3f_AR_crouch_walk.rfa", "mnr3f_AR_fire.rfa", "mnr3f_AR_reload.rfa",
+        "mnr3f_AR_run.rfa", "mnr3f_AR_stand.rfa", "mnr3f_AR_walk.rfa", "mnr3f_FT_crouch.rfa",
+        "mnr3f_FT_crouch_walk.rfa", "mnr3f_FT_fire.rfa", "mnr3f_FT_fire_ALT.rfa", "mnr3f_FT_reload.rfa",
+        "mnr3f_FT_run.rfa", "mnr3f_FT_stand.rfa", "mnr3f_FT_walk.rfa", "mnr3f_GRN_fire.rfa",
+        "mnr3f_GRN_fire_ALT.rfa", "mnr3f_Hmac_crouch.rfa", "mnr3f_Hmac_crouch_walk.rfa", "mnr3f_Hmac_fire.rfa",
+        "mnr3f_Hmac_reload.rfa", "mnr3f_Hmac_run.rfa", "mnr3f_Hmac_stand.rfa", "mnr3f_Hmac_walk.rfa",
+        "mnr3f_Rcharge_toss.rfa", "mnr3f_RL_crouch.rfa", "mnr3f_RL_crouch_walk.rfa", "mnr3f_RL_fire.rfa",
+        "mnr3f_RL_reload.rfa", "mnr3f_RL_run.rfa", "mnr3f_RL_stand.rfa", "mnr3f_RL_walk.rfa",
+        "mnr3f_RR_crouch.rfa", "mnr3f_RR_crouch_walk.rfa", "mnr3f_RR_fire.rfa", "mnr3f_RR_run.rfa",
+        "mnr3f_RR_stand.rfa", "mnr3f_RR_walk.rfa", "mnr3f_rs_crouch_walk.rfa", "mnr3f_Rshield_crouch.rfa",
+        "mnr3f_Rshield_crouch_walk.rfa", "mnr3f_Rshield_fire.rfa", "mnr3f_Rshield_run.rfa", "mnr3f_Rshield_stand.rfa",
+        "mnr3f_Rshield_walk.rfa", "mnr3f_SG_crouch_walk.rfa", "mnr3f_SMC_crouch.rfa", "mnr3f_SMC_crouch_walk.rfa",
+        "mnr3f_SMC_fire.rfa", "mnr3f_SMC_run.rfa", "mnr3f_SMC_stand.rfa", "mnr3f_SMC_walk.rfa",
+        "mnr3f_SR_crouch.rfa", "mnr3f_SR_crouch_walk.rfa", "mnr3f_SR_fire.rfa", "mnr3f_SR_reload.rfa",
+        "mnr3f_SR_run.rfa", "mnr3f_SR_stand.rfa", "mnr3f_SR_walk.rfa", "mnr3f_swim_stand.rfa",
+        "mnr3f_swim_walk.rfa", "mnrf_mp_attack_crouch.rfa", "mnrf_mp_attack_stand.rfa", "mnrf_mp_crouch_fire.rfa",
+        "mnrf_mp_reload.rfa", "mnrf_mp_run.rfa", "mnrf_mp_stand_fire.rfa", "mnrf_mp_walk.rfa",
+        "mnrf_rs_attack.rfa", "mnrf_rs_attack_crouch.rfa", "mnrf_rs_attack_stand.rfa", "mnrf_rs_crouch_attack.rfa",
+        "mnrf_rs_reload.rfa", "mnrf_rs_run.rfa", "mnrf_rs_taser.rfa", "mnrf_rs_taser_crouch.rfa",
+        "mnrf_rs_walk.rfa", "mnrf_sg_attack_crouch.rfa", "mnrf_sg_attack_stand.rfa", "mnrf_sg_crouch_fire_auto.rfa",
+        "mnrf_sg_crouch_fire_pump.rfa", "mnrf_sg_fire_auto.rfa", "mnrf_sg_fire_pump.rfa", "mnrf_sg_reload.rfa",
+        "mnrf_sg_run.rfa", "mnrf_sg_walk.rfa", "NURS_heal.rfa", "NURS_talk.rfa",
+        "NURS_talk_short.rfa",
+    ],
+    "miner3.v3c": [  # MP: female_miner / multi_female, 133 anims
+        "ADFM_cower.rfa", "ADFM_crouch.rfa", "ADFM_death_blast_backwards.rfa", "ADFM_death_blast_forwards.rfa",
+        "ADFM_death_chest_backwards.rfa", "ADFM_death_chest_forwards.rfa", "ADFM_death_crouch.rfa", "ADFM_death_generic.rfa",
+        "ADFM_death_head_backwards.rfa", "ADFM_death_head_forwards.rfa", "ADFM_death_leg_left.rfa", "ADFM_death_leg_right.rfa",
+        "ADFM_flinch_back.rfa", "ADFM_flinch_chest.rfa", "ADFM_flinch_leg_left.rfa", "ADFM_flinch_leg_right.rfa",
+        "ADFM_freefall.rfa", "adfm_run_flail.rfa", "admin_fem_corpsecarry.rfa", "admin_fem_corpsedrop.rfa",
+        "admin_fem_idle01.rfa", "admin_fem_run.rfa", "admin_fem_run_flee.rfa", "admin_fem_stand.rfa",
+        "admin_fem_walk.rfa", "eos_sidestep_left.rfa", "eos_sidestep_right.rfa", "masa_sar_attack_crouch.rfa",
+        "masa_sar_attack_stand.rfa", "masa_sar_crouch_fire.rfa", "masa_sar_reload.rfa", "masa_sar_run.rfa",
+        "masa_sar_stand_fire.rfa", "masa_sar_walk.rfa", "mnr3f_12mm_crouch.rfa", "mnr3f_12mm_crouch_walk.rfa",
+        "mnr3f_12mm_fire.rfa", "mnr3f_12mm_reload.rfa", "mnr3f_12mm_run.rfa", "mnr3f_12mm_stand.rfa",
+        "mnr3f_12mm_walk.rfa", "mnr3f_AR_crouch.rfa", "mnr3f_AR_crouch_walk.rfa", "mnr3f_AR_fire.rfa",
+        "mnr3f_AR_reload.rfa", "mnr3f_AR_run.rfa", "mnr3f_AR_stand.rfa", "mnr3f_AR_walk.rfa",
+        "mnr3f_FT_crouch.rfa", "mnr3f_FT_crouch_walk.rfa", "mnr3f_FT_fire.rfa", "mnr3f_FT_fire_ALT.rfa",
+        "mnr3f_FT_reload.rfa", "mnr3f_FT_run.rfa", "mnr3f_FT_stand.rfa", "mnr3f_FT_walk.rfa",
+        "mnr3f_GRN_fire.rfa", "mnr3f_GRN_fire_ALT.rfa", "mnr3f_Hmac_crouch.rfa", "mnr3f_Hmac_crouch_walk.rfa",
+        "mnr3f_Hmac_fire.rfa", "mnr3f_Hmac_reload.rfa", "mnr3f_Hmac_run.rfa", "mnr3f_Hmac_stand.rfa",
+        "mnr3f_Hmac_walk.rfa", "mnr3f_Rcharge_toss.rfa", "mnr3f_RL_crouch.rfa", "mnr3f_RL_crouch_walk.rfa",
+        "mnr3f_RL_fire.rfa", "mnr3f_RL_reload.rfa", "mnr3f_RL_run.rfa", "mnr3f_RL_stand.rfa",
+        "mnr3f_RL_walk.rfa", "mnr3f_RR_crouch.rfa", "mnr3f_RR_crouch_walk.rfa", "mnr3f_RR_fire.rfa",
+        "mnr3f_RR_run.rfa", "mnr3f_RR_stand.rfa", "mnr3f_RR_walk.rfa", "mnr3f_rs_crouch_walk.rfa",
+        "mnr3f_Rshield_crouch.rfa", "mnr3f_Rshield_crouch_walk.rfa", "mnr3f_Rshield_fire.rfa", "mnr3f_Rshield_run.rfa",
+        "mnr3f_Rshield_stand.rfa", "mnr3f_Rshield_walk.rfa", "mnr3f_SG_crouch_walk.rfa", "mnr3f_SMC_crouch.rfa",
+        "mnr3f_SMC_crouch_walk.rfa", "mnr3f_SMC_fire.rfa", "mnr3f_SMC_run.rfa", "mnr3f_SMC_stand.rfa",
+        "mnr3f_SMC_walk.rfa", "mnr3f_SR_crouch.rfa", "mnr3f_SR_crouch_walk.rfa", "mnr3f_SR_fire.rfa",
+        "mnr3f_SR_reload.rfa", "mnr3f_SR_run.rfa", "mnr3f_SR_stand.rfa", "mnr3f_SR_walk.rfa",
+        "mnr3f_swim_stand.rfa", "mnr3f_swim_walk.rfa", "mnrf_mp_attack_crouch.rfa", "mnrf_mp_attack_stand.rfa",
+        "mnrf_mp_crouch.rfa", "mnrf_mp_crouch_fire.rfa", "mnrf_mp_reload.rfa", "mnrf_mp_run.rfa",
+        "mnrf_mp_stand.rfa", "mnrf_mp_stand_fire.rfa", "mnrf_mp_walk.rfa", "mnrf_rs_attack.rfa",
+        "mnrf_rs_attack_crouch.rfa", "mnrf_rs_attack_stand.rfa", "mnrf_rs_crouch_attack.rfa", "mnrf_rs_reload.rfa",
+        "mnrf_rs_run.rfa", "mnrf_rs_taser.rfa", "mnrf_rs_taser_crouch.rfa", "mnrf_rs_walk.rfa",
+        "mnrf_sg_attack_crouch.rfa", "mnrf_sg_attack_stand.rfa", "mnrf_sg_crouch_fire_auto.rfa", "mnrf_sg_crouch_fire_pump.rfa",
+        "mnrf_sg_fire_auto.rfa", "mnrf_sg_fire_pump.rfa", "mnrf_sg_reload.rfa", "mnrf_sg_run.rfa",
+        "mnrf_sg_stand.rfa", "mnrf_sg_walk.rfa", "mnrf_talk_long.rfa", "mnrf_talk_short.rfa",
+        "Ult2_run_flee_AR.rfa",
+    ],
+    "admin_fem.v3c": [  # MP: female_admin / multi_female, 128 anims
+        "ADFM_cower.rfa", "ADFM_crouch.rfa", "ADFM_death_blast_backwards.rfa", "ADFM_death_blast_forwards.rfa",
+        "ADFM_death_chest_backwards.rfa", "ADFM_death_chest_forwards.rfa", "ADFM_death_crouch.rfa", "ADFM_death_generic.rfa",
+        "ADFM_death_head_backwards.rfa", "ADFM_death_head_forwards.rfa", "ADFM_death_leg_left.rfa", "ADFM_death_leg_right.rfa",
+        "ADFM_flinch_back.rfa", "ADFM_flinch_chest.rfa", "ADFM_flinch_leg_left.rfa", "ADFM_flinch_leg_right.rfa",
+        "ADFM_freefall.rfa", "ADFM_hit_alarm.rfa", "adfm_run_flail.rfa", "admin_fem_corpsecarry.rfa",
+        "admin_fem_corpsedrop.rfa", "admin_fem_idle01.rfa", "admin_fem_run.rfa", "admin_fem_run_flee.rfa",
+        "admin_fem_stand.rfa", "admin_fem_talk.rfa", "admin_fem_talk_short.rfa", "admin_fem_walk.rfa",
+        "masa_sar_attack_crouch.rfa", "masa_sar_attack_stand.rfa", "masa_sar_crouch_fire.rfa", "masa_sar_reload.rfa",
+        "masa_sar_run.rfa", "masa_sar_stand_fire.rfa", "masa_sar_walk.rfa", "mnr3f_12mm_crouch.rfa",
+        "mnr3f_12mm_crouch_walk.rfa", "mnr3f_12mm_fire.rfa", "mnr3f_12mm_reload.rfa", "mnr3f_12mm_run.rfa",
+        "mnr3f_12mm_stand.rfa", "mnr3f_12mm_walk.rfa", "mnr3f_AR_crouch.rfa", "mnr3f_AR_crouch_walk.rfa",
+        "mnr3f_AR_fire.rfa", "mnr3f_AR_reload.rfa", "mnr3f_AR_run.rfa", "mnr3f_AR_stand.rfa",
+        "mnr3f_AR_walk.rfa", "mnr3f_FT_crouch.rfa", "mnr3f_FT_crouch_walk.rfa", "mnr3f_FT_fire.rfa",
+        "mnr3f_FT_fire_ALT.rfa", "mnr3f_FT_reload.rfa", "mnr3f_FT_run.rfa", "mnr3f_FT_stand.rfa",
+        "mnr3f_FT_walk.rfa", "mnr3f_GRN_fire.rfa", "mnr3f_GRN_fire_ALT.rfa", "mnr3f_Hmac_crouch.rfa",
+        "mnr3f_Hmac_crouch_walk.rfa", "mnr3f_Hmac_fire.rfa", "mnr3f_Hmac_reload.rfa", "mnr3f_Hmac_run.rfa",
+        "mnr3f_Hmac_stand.rfa", "mnr3f_Hmac_walk.rfa", "mnr3f_Rcharge_toss.rfa", "mnr3f_RL_crouch.rfa",
+        "mnr3f_RL_crouch_walk.rfa", "mnr3f_RL_fire.rfa", "mnr3f_RL_reload.rfa", "mnr3f_RL_run.rfa",
+        "mnr3f_RL_stand.rfa", "mnr3f_RL_walk.rfa", "mnr3f_RR_crouch.rfa", "mnr3f_RR_crouch_walk.rfa",
+        "mnr3f_RR_fire.rfa", "mnr3f_RR_run.rfa", "mnr3f_RR_stand.rfa", "mnr3f_RR_walk.rfa",
+        "mnr3f_rs_crouch_walk.rfa", "mnr3f_Rshield_crouch.rfa", "mnr3f_Rshield_crouch_walk.rfa", "mnr3f_Rshield_fire.rfa",
+        "mnr3f_Rshield_run.rfa", "mnr3f_Rshield_stand.rfa", "mnr3f_Rshield_walk.rfa", "mnr3f_SG_crouch_walk.rfa",
+        "mnr3f_SMC_crouch.rfa", "mnr3f_SMC_crouch_walk.rfa", "mnr3f_SMC_fire.rfa", "mnr3f_SMC_run.rfa",
+        "mnr3f_SMC_stand.rfa", "mnr3f_SMC_walk.rfa", "mnr3f_SR_crouch.rfa", "mnr3f_SR_crouch_walk.rfa",
+        "mnr3f_SR_fire.rfa", "mnr3f_SR_reload.rfa", "mnr3f_SR_run.rfa", "mnr3f_SR_stand.rfa",
+        "mnr3f_SR_walk.rfa", "mnr3f_swim_stand.rfa", "mnr3f_swim_walk.rfa", "mnrf_mp_attack_crouch.rfa",
+        "mnrf_mp_attack_stand.rfa", "mnrf_mp_crouch_fire.rfa", "mnrf_mp_reload.rfa", "mnrf_mp_run.rfa",
+        "mnrf_mp_stand_fire.rfa", "mnrf_mp_walk.rfa", "mnrf_rs_attack.rfa", "mnrf_rs_attack_crouch.rfa",
+        "mnrf_rs_attack_stand.rfa", "mnrf_rs_crouch_attack.rfa", "mnrf_rs_reload.rfa", "mnrf_rs_run.rfa",
+        "mnrf_rs_taser.rfa", "mnrf_rs_taser_crouch.rfa", "mnrf_rs_walk.rfa", "mnrf_sg_attack_crouch.rfa",
+        "mnrf_sg_attack_stand.rfa", "mnrf_sg_crouch_fire_auto.rfa", "mnrf_sg_crouch_fire_pump.rfa", "mnrf_sg_fire_auto.rfa",
+        "mnrf_sg_fire_pump.rfa", "mnrf_sg_reload.rfa", "mnrf_sg_run.rfa", "mnrf_sg_walk.rfa",
+    ],
+    "masako.v3c": [  # MP: masako / multi_female, 134 anims
+        "ADFM_cower.rfa", "ADFM_crouch.rfa", "ADFM_death_blast_backwards.rfa", "ADFM_death_blast_forwards.rfa",
+        "ADFM_death_chest_backwards.rfa", "ADFM_death_chest_forwards.rfa", "ADFM_death_crouch.rfa", "ADFM_death_generic.rfa",
+        "ADFM_death_head_backwards.rfa", "ADFM_death_head_forwards.rfa", "ADFM_death_leg_left.rfa", "ADFM_death_leg_right.rfa",
+        "ADFM_flinch_back.rfa", "ADFM_flinch_chest.rfa", "ADFM_flinch_leg_left.rfa", "ADFM_flinch_leg_right.rfa",
+        "ADFM_freefall.rfa", "adfm_run_flail.rfa", "admin_fem_corpsecarry.rfa", "admin_fem_corpsedrop.rfa",
+        "admin_fem_idle01.rfa", "admin_fem_run.rfa", "admin_fem_run_flee.rfa", "admin_fem_walk.rfa",
+        "eos_sidestep_left.rfa", "eos_sidestep_right.rfa", "masa_attack_roll_left.rfa", "masa_attack_roll_right.rfa",
+        "masa_sar_attack_crouch.rfa", "masa_sar_attack_stand.rfa", "masa_sar_crouch.rfa", "masa_sar_crouch_fire.rfa",
+        "masa_sar_flinch_back.rfa", "masa_sar_flinch_chest.rfa", "masa_sar_reload.rfa", "masa_sar_run.rfa",
+        "masa_sar_stand.rfa", "masa_sar_stand_fire.rfa", "masa_sar_walk.rfa", "masa_talk.rfa",
+        "masa_talk_short.rfa", "mnr3f_12mm_crouch.rfa", "mnr3f_12mm_crouch_walk.rfa", "mnr3f_12mm_fire.rfa",
+        "mnr3f_12mm_reload.rfa", "mnr3f_12mm_run.rfa", "mnr3f_12mm_stand.rfa", "mnr3f_12mm_walk.rfa",
+        "mnr3f_AR_crouch.rfa", "mnr3f_AR_crouch_walk.rfa", "mnr3f_AR_fire.rfa", "mnr3f_AR_reload.rfa",
+        "mnr3f_AR_run.rfa", "mnr3f_AR_stand.rfa", "mnr3f_AR_walk.rfa", "mnr3f_FT_crouch.rfa",
+        "mnr3f_FT_crouch_walk.rfa", "mnr3f_FT_fire.rfa", "mnr3f_FT_fire_ALT.rfa", "mnr3f_FT_reload.rfa",
+        "mnr3f_FT_run.rfa", "mnr3f_FT_stand.rfa", "mnr3f_FT_walk.rfa", "mnr3f_GRN_fire.rfa",
+        "mnr3f_GRN_fire_ALT.rfa", "mnr3f_Hmac_crouch.rfa", "mnr3f_Hmac_crouch_walk.rfa", "mnr3f_Hmac_fire.rfa",
+        "mnr3f_Hmac_reload.rfa", "mnr3f_Hmac_run.rfa", "mnr3f_Hmac_stand.rfa", "mnr3f_Hmac_walk.rfa",
+        "mnr3f_Rcharge_toss.rfa", "mnr3f_RL_crouch.rfa", "mnr3f_RL_crouch_walk.rfa", "mnr3f_RL_fire.rfa",
+        "mnr3f_RL_reload.rfa", "mnr3f_RL_run.rfa", "mnr3f_RL_stand.rfa", "mnr3f_RL_walk.rfa",
+        "mnr3f_RR_crouch.rfa", "mnr3f_RR_crouch_walk.rfa", "mnr3f_RR_fire.rfa", "mnr3f_RR_run.rfa",
+        "mnr3f_RR_stand.rfa", "mnr3f_RR_walk.rfa", "mnr3f_rs_crouch_walk.rfa", "mnr3f_Rshield_crouch.rfa",
+        "mnr3f_Rshield_crouch_walk.rfa", "mnr3f_Rshield_fire.rfa", "mnr3f_Rshield_run.rfa", "mnr3f_Rshield_stand.rfa",
+        "mnr3f_Rshield_walk.rfa", "mnr3f_SG_crouch_walk.rfa", "mnr3f_SMC_crouch.rfa", "mnr3f_SMC_crouch_walk.rfa",
+        "mnr3f_SMC_fire.rfa", "mnr3f_SMC_run.rfa", "mnr3f_SMC_stand.rfa", "mnr3f_SMC_walk.rfa",
+        "mnr3f_SR_crouch.rfa", "mnr3f_SR_crouch_walk.rfa", "mnr3f_SR_fire.rfa", "mnr3f_SR_reload.rfa",
+        "mnr3f_SR_run.rfa", "mnr3f_SR_stand.rfa", "mnr3f_SR_walk.rfa", "mnr3f_swim_stand.rfa",
+        "mnr3f_swim_walk.rfa", "mnrf_mp_attack_crouch.rfa", "mnrf_mp_attack_stand.rfa", "mnrf_mp_crouch_fire.rfa",
+        "mnrf_mp_reload.rfa", "mnrf_mp_run.rfa", "mnrf_mp_stand_fire.rfa", "mnrf_mp_walk.rfa",
+        "mnrf_rs_attack.rfa", "mnrf_rs_attack_crouch.rfa", "mnrf_rs_attack_stand.rfa", "mnrf_rs_crouch_attack.rfa",
+        "mnrf_rs_reload.rfa", "mnrf_rs_run.rfa", "mnrf_rs_taser.rfa", "mnrf_rs_taser_crouch.rfa",
+        "mnrf_rs_walk.rfa", "mnrf_sg_attack_crouch.rfa", "mnrf_sg_attack_stand.rfa", "mnrf_sg_crouch_fire_auto.rfa",
+        "mnrf_sg_crouch_fire_pump.rfa", "mnrf_sg_fire_auto.rfa", "mnrf_sg_fire_pump.rfa", "mnrf_sg_reload.rfa",
+        "mnrf_sg_run.rfa", "mnrf_sg_walk.rfa",
+    ],
+    "eos.v3c": [  # MP: eos / multi_female, 128 anims
+        "ADFM_cower.rfa", "ADFM_crouch.rfa", "ADFM_death_blast_backwards.rfa", "ADFM_death_blast_forwards.rfa",
+        "ADFM_death_chest_backwards.rfa", "ADFM_death_chest_forwards.rfa", "ADFM_death_crouch.rfa", "ADFM_death_generic.rfa",
+        "ADFM_death_head_backwards.rfa", "ADFM_death_head_forwards.rfa", "ADFM_death_leg_left.rfa", "ADFM_flinch_back.rfa",
+        "ADFM_flinch_chest.rfa", "ADFM_flinch_leg_left.rfa", "ADFM_flinch_leg_right.rfa", "ADFM_freefall.rfa",
+        "adfm_run_flail.rfa", "admin_fem_corpsedrop.rfa", "admin_fem_idle01.rfa", "admin_fem_run.rfa",
+        "admin_fem_run_flee.rfa", "admin_fem_walk.rfa", "eos_sidestep_left.rfa", "eos_sidestep_right.rfa",
+        "eos_talk.rfa", "eos_talk_short.rfa", "masa_sar_attack_crouch.rfa", "masa_sar_attack_stand.rfa",
+        "masa_sar_crouch_fire.rfa", "masa_sar_reload.rfa", "masa_sar_run.rfa", "masa_sar_stand_fire.rfa",
+        "masa_sar_walk.rfa", "mnr3f_12mm_crouch.rfa", "mnr3f_12mm_crouch_walk.rfa", "mnr3f_12mm_fire.rfa",
+        "mnr3f_12mm_reload.rfa", "mnr3f_12mm_run.rfa", "mnr3f_12mm_stand.rfa", "mnr3f_12mm_walk.rfa",
+        "mnr3f_AR_crouch.rfa", "mnr3f_AR_crouch_walk.rfa", "mnr3f_AR_fire.rfa", "mnr3f_AR_reload.rfa",
+        "mnr3f_AR_run.rfa", "mnr3f_AR_stand.rfa", "mnr3f_AR_walk.rfa", "mnr3f_FT_crouch.rfa",
+        "mnr3f_FT_crouch_walk.rfa", "mnr3f_FT_fire.rfa", "mnr3f_FT_fire_ALT.rfa", "mnr3f_FT_reload.rfa",
+        "mnr3f_FT_run.rfa", "mnr3f_FT_stand.rfa", "mnr3f_FT_walk.rfa", "mnr3f_GRN_fire.rfa",
+        "mnr3f_GRN_fire_ALT.rfa", "mnr3f_Hmac_crouch.rfa", "mnr3f_Hmac_crouch_walk.rfa", "mnr3f_Hmac_fire.rfa",
+        "mnr3f_Hmac_reload.rfa", "mnr3f_Hmac_run.rfa", "mnr3f_Hmac_stand.rfa", "mnr3f_Hmac_walk.rfa",
+        "mnr3f_Rcharge_toss.rfa", "mnr3f_RL_crouch.rfa", "mnr3f_RL_crouch_walk.rfa", "mnr3f_RL_fire.rfa",
+        "mnr3f_RL_reload.rfa", "mnr3f_RL_run.rfa", "mnr3f_RL_stand.rfa", "mnr3f_RL_walk.rfa",
+        "mnr3f_RR_crouch.rfa", "mnr3f_RR_crouch_walk.rfa", "mnr3f_RR_fire.rfa", "mnr3f_RR_run.rfa",
+        "mnr3f_RR_stand.rfa", "mnr3f_RR_walk.rfa", "mnr3f_rs_crouch_walk.rfa", "mnr3f_Rshield_crouch.rfa",
+        "mnr3f_Rshield_crouch_walk.rfa", "mnr3f_Rshield_fire.rfa", "mnr3f_Rshield_run.rfa", "mnr3f_Rshield_stand.rfa",
+        "mnr3f_Rshield_walk.rfa", "mnr3f_SG_crouch_walk.rfa", "mnr3f_SMC_crouch.rfa", "mnr3f_SMC_crouch_walk.rfa",
+        "mnr3f_SMC_fire.rfa", "mnr3f_SMC_run.rfa", "mnr3f_SMC_stand.rfa", "mnr3f_SMC_walk.rfa",
+        "mnr3f_SR_crouch.rfa", "mnr3f_SR_crouch_walk.rfa", "mnr3f_SR_fire.rfa", "mnr3f_SR_reload.rfa",
+        "mnr3f_SR_run.rfa", "mnr3f_SR_stand.rfa", "mnr3f_SR_walk.rfa", "mnr3f_swim_stand.rfa",
+        "mnr3f_swim_walk.rfa", "mnrf_mp_attack_crouch.rfa", "mnrf_mp_attack_stand.rfa", "mnrf_mp_crouch.rfa",
+        "mnrf_mp_crouch_fire.rfa", "mnrf_mp_reload.rfa", "mnrf_mp_run.rfa", "mnrf_mp_stand.rfa",
+        "mnrf_mp_stand_fire.rfa", "mnrf_mp_walk.rfa", "mnrf_rs_attack.rfa", "mnrf_rs_attack_crouch.rfa",
+        "mnrf_rs_attack_stand.rfa", "mnrf_rs_crouch_attack.rfa", "mnrf_rs_reload.rfa", "mnrf_rs_run.rfa",
+        "mnrf_rs_taser.rfa", "mnrf_rs_taser_crouch.rfa", "mnrf_rs_walk.rfa", "mnrf_sg_attack_crouch.rfa",
+        "mnrf_sg_attack_stand.rfa", "mnrf_sg_crouch_fire_auto.rfa", "mnrf_sg_crouch_fire_pump.rfa", "mnrf_sg_fire_auto.rfa",
+        "mnrf_sg_fire_pump.rfa", "mnrf_sg_reload.rfa", "mnrf_sg_run.rfa", "mnrf_sg_walk.rfa",
+    ],
+    "merc_grunt.v3c": [  # MP: merc_grunt / multi_merc, 125 anims
+        "mcom_swim_stand.rfa", "mcom_swim_walk.rfa", "mrc1_attack_crouch.rfa", "mrc1_attack_crouch_RR.rfa",
+        "mrc1_attack_fire.rfa", "mrc1_attack_run.rfa", "mrc1_attack_run_RR.rfa", "mrc1_attack_stand.rfa",
+        "mrc1_attack_stand_grenade.rfa", "mrc1_attack_stand_RR.rfa", "mrc1_attack_walk.rfa", "mrc1_attack_walk_RR.rfa",
+        "mrc1_corpse_carried.rfa", "mrc1_corpse_drop.rfa", "mrc1_cower.rfa", "mrc1_crouch.rfa",
+        "mrc1_death_blast_back.rfa", "mrc1_death_blast_fore.rfa", "mrc1_death_crouch.rfa", "mrc1_death_generic.rfa",
+        "mrc1_death_generic_chest.rfa", "mrc1_death_generic_head.rfa", "mrc1_death_head_back.rfa", "mrc1_death_head_fore.rfa",
+        "mrc1_death_leg_L.rfa", "mrc1_death_leg_R.rfa", "mrc1_death_torso_back.rfa", "mrc1_death_torso_fore.rfa",
+        "mrc1_fire_ALT_FT.rfa", "mrc1_fire_grenade.rfa", "mrc1_fire_grenade_ALT.rfa", "mrc1_fire_reload_RR.rfa",
+        "mrc1_fire_reload_RR_C.rfa", "mrc1_Fleerun.rfa", "mrc1_flinch_back.rfa", "mrc1_flinch_chest.rfa",
+        "mrc1_flinch_leg_L.rfa", "mrc1_flinch_leg_R.rfa", "mrc1_freefall.rfa", "mrc1_ft_alt_fire_stand.rfa",
+        "mrc1_idle.rfa", "mrc1_idle2.rfa", "mrc1_idle2_RR.rfa", "mrc1_reload-FT.rfa",
+        "mrc1_reload.rfa", "mrc1_run.rfa", "mrc1_run_flail.rfa", "mrc1_sidestep_left.rfa",
+        "mrc1_sidestep_right.rfa", "mrc1_stand-fire-FT.rfa", "mrc1_stand.rfa", "mrc1_stand_FT.rfa",
+        "mrc1_walk.rfa", "mrc2_crouch_12mm.rfa", "mrc2_crouch_MP.rfa", "mrc2_crouch_RL.rfa",
+        "mrc2_crouch_RS.rfa", "mrc2_crouch_Rshield.rfa", "mrc2_crouch_SG.rfa", "mrc2_crouch_SR.rfa",
+        "mrc2_crouch_walk_12mm.rfa", "mrc2_crouch_walk_FT.rfa", "mrc2_crouch_walk_GRN.rfa", "mrc2_crouch_walk_Hmac.rfa",
+        "mrc2_crouch_walk_MP.rfa", "mrc2_crouch_walk_RL.rfa", "mrc2_crouch_walk_RR.rfa", "mrc2_crouch_walk_RS.rfa",
+        "mrc2_crouch_walk_Rshield.rfa", "mrc2_crouch_walk_SG.rfa", "mrc2_crouch_walk_SMC.rfa", "mrc2_crouch_walk_SR.rfa",
+        "mrc2_fire_12mm.rfa", "mrc2_fire_ALT_SG.rfa", "mrc2_fire_MP.rfa", "mrc2_fire_Rcharge.rfa",
+        "mrc2_fire_RL.rfa", "mrc2_fire_RS.rfa", "mrc2_fire_Rshield.rfa", "mrc2_fire_SG.rfa",
+        "mrc2_fire_SR.rfa", "mrc2_reload_12mm.rfa", "mrc2_reload_MP.rfa", "mrc2_reload_RL.rfa",
+        "mrc2_reload_RS.rfa", "mrc2_reload_SG.rfa", "mrc2_reload_SR.rfa", "mrc2_run_12mm.rfa",
+        "mrc2_run_FT.rfa", "mrc2_run_MP.rfa", "mrc2_run_RL.rfa", "mrc2_run_RS.rfa",
+        "mrc2_run_Rshield.rfa", "mrc2_run_SG.rfa", "mrc2_run_SR.rfa", "mrc2_stand_12mm.rfa",
+        "mrc2_stand_MP.rfa", "mrc2_stand_RL.rfa", "mrc2_stand_RS.rfa", "mrc2_stand_Rshield.rfa",
+        "mrc2_stand_SG.rfa", "mrc2_stand_SR.rfa", "mrc2_walk_12mm.rfa", "mrc2_walk_MP.rfa",
+        "mrc2_walk_RL.rfa", "mrc2_walk_RS.rfa", "mrc2_walk_Rshield.rfa", "mrc2_walk_SG.rfa",
+        "mrc2_walk_SR.rfa", "mrch_attack_crouch.rfa", "mrch_attack_crouch_smw.rfa", "mrch_attack_fire.rfa",
+        "mrch_attack_run.rfa", "mrch_attack_stand.rfa", "mrch_attack_stand_smw.rfa", "mrch_attack_walk.rfa",
+        "mrch_attack_walk_smw.rfa", "mrch_crouch_fire.rfa", "mrch_fire_crouch_smw.rfa", "mrch_fire_smw.rfa",
+        "mrch_flinch_back_smw.rfa", "mrch_flinch_front_smw.rfa", "mrch_idle_smw.rfa", "mrch_reload.rfa",
+        "mrch_run_smw.rfa",
+    ],
+    "tech1.v3c": [  # MP: tech / multi_civilian, 129 anims
+        "tech01_blast_back.rfa", "tech01_blast_forwards.rfa", "tech01_corpse_carry.rfa", "tech01_cower_loop.rfa",
+        "tech01_crouch.rfa", "tech01_death_corpse_drop.rfa", "tech01_death_crouch.rfa", "tech01_death_generic.rfa",
+        "tech01_death_head_back.rfa", "tech01_death_head_fore.rfa", "tech01_death_leg_L.rfa", "tech01_death_leg_R.rfa",
+        "tech01_death_spin_fall_L.rfa", "tech01_death_torso_forward.rfa", "tech01_flinch.rfa", "tech01_flinch_back.rfa",
+        "tech01_flinch_leg_L.rfa", "tech01_flinch_leg_R.rfa", "tech01_freefall.rfa", "tech01_hit_alarm.rfa",
+        "tech01_idle_01.rfa", "tech01_run.rfa", "tech01_run_flail.rfa", "tech01_run_flee.rfa",
+        "tech01_stand.rfa", "tech01_talk.rfa", "tech01_talk_short.rfa", "tech01_walk.rfa",
+        "tech_12mm_crouch.rfa", "tech_12mm_crouch_walk.rfa", "tech_12mm_fire.rfa", "tech_12mm_reload.rfa",
+        "tech_12mm_run.rfa", "tech_12mm_stand.rfa", "tech_12mm_walk.rfa", "tech_ar_crouch.rfa",
+        "tech_ar_crouch_walk.rfa", "tech_ar_fire.rfa", "tech_ar_reload.rfa", "tech_ar_run.rfa",
+        "tech_ar_stand.rfa", "tech_ar_walk.rfa", "tech_ft_crouch.rfa", "tech_ft_crouch_walk.rfa",
+        "tech_ft_fire.rfa", "Tech_FT_fire_ALT.rfa", "tech_ft_reload.rfa", "tech_ft_run.rfa",
+        "tech_ft_stand.rfa", "tech_ft_walk.rfa", "tech_gren_attack.rfa", "tech_gren_crouch.rfa",
+        "tech_gren_crouch_walk.rfa", "tech_gren_run.rfa", "tech_gren_stand.rfa", "tech_gren_throw.rfa",
+        "tech_gren_throw_alt.rfa", "tech_gren_walk.rfa", "tech_hmac_crouch.rfa", "tech_hmac_crouch_walk.rfa",
+        "tech_hmac_fire.rfa", "tech_hmac_reload.rfa", "tech_hmac_run.rfa", "tech_hmac_stand.rfa",
+        "tech_hmac_walk.rfa", "tech_mp_crouch.rfa", "tech_mp_crouch_walk.rfa", "tech_mp_fire.rfa",
+        "tech_mp_reload.rfa", "tech_mp_run.rfa", "tech_mp_stand.rfa", "tech_mp_walk.rfa",
+        "tech_rc_toss.rfa", "tech_RL_crouch.rfa", "tech_RL_crouch_walk.rfa", "tech_RL_fire.rfa",
+        "tech_RL_reload.rfa", "tech_RL_run.rfa", "tech_RL_stand.rfa", "tech_RL_walk.rfa",
+        "tech_rr_crouch.rfa", "tech_rr_crouch_walk.rfa", "tech_rr_reload.rfa", "tech_rr_run.rfa",
+        "tech_rr_stand.rfa", "tech_rr_walk.rfa", "tech_rs_attack.rfa", "tech_rs_attack_alt.rfa",
+        "tech_rs_crouch.rfa", "tech_rs_crouch_walk.rfa", "tech_rs_reload.rfa", "tech_rs_run.rfa",
+        "tech_rs_stand.rfa", "tech_rs_walk.rfa", "tech_rshield_crouch.rfa", "tech_rshield_crouch_walk.rfa",
+        "tech_rshield_fire.rfa", "tech_rshield_run.rfa", "tech_rshield_stand.rfa", "tech_rshield_walk.rfa",
+        "tech_sar_crouch.rfa", "tech_sar_crouch_walk.rfa", "tech_sar_fire.rfa", "tech_sar_reload.rfa",
+        "tech_sar_run.rfa", "tech_sar_stand.rfa", "tech_sar_walk.rfa", "tech_sg_crouch.rfa",
+        "tech_sg_crouch_walk.rfa", "tech_sg_fire.rfa", "tech_sg_fire_auto.rfa", "tech_sg_reload.rfa",
+        "tech_sg_run.rfa", "tech_sg_stand.rfa", "tech_sg_walk.rfa", "tech_smc_crouch.rfa",
+        "tech_smc_crouch_walk.rfa", "tech_smc_fire_reload.rfa", "tech_smc_stand.rfa", "tech_smc_walk.rfa",
+        "tech_SR_crouch.rfa", "tech_SR_crouch_walk.rfa", "tech_SR_fire.rfa", "tech_SR_reload.rfa",
+        "tech_SR_run.rfa", "tech_SR_stand.rfa", "tech_SR_walk.rfa", "Tech_swim_stand.rfa",
+        "Tech_swim_walk.rfa",
+    ],
+    "ult_scientist.v3c": [  # MP: scientist / multi_civilian, 128 anims
+        "tech01_blast_forwards.rfa", "tech01_corpse_carry.rfa", "tech01_cower_loop.rfa", "tech01_crouch.rfa",
+        "tech01_death_corpse_drop.rfa", "tech01_death_crouch.rfa", "tech01_death_generic.rfa", "tech01_death_head_back.rfa",
+        "tech01_death_head_fore.rfa", "tech01_death_leg_L.rfa", "tech01_death_leg_R.rfa", "tech01_death_spin_fall_L.rfa",
+        "tech01_death_torso_forward.rfa", "tech01_flinch.rfa", "tech01_flinch_back.rfa", "tech01_flinch_leg_L.rfa",
+        "tech01_flinch_leg_R.rfa", "tech01_freefall.rfa", "tech01_hit_alarm.rfa", "tech01_idle_01.rfa",
+        "tech01_run.rfa", "tech01_run_flail.rfa", "tech01_run_flee.rfa", "tech01_stand.rfa",
+        "tech01_walk.rfa", "tech_12mm_crouch.rfa", "tech_12mm_crouch_walk.rfa", "tech_12mm_fire.rfa",
+        "tech_12mm_reload.rfa", "tech_12mm_run.rfa", "tech_12mm_stand.rfa", "tech_12mm_walk.rfa",
+        "tech_ar_crouch.rfa", "tech_ar_crouch_walk.rfa", "tech_ar_fire.rfa", "tech_ar_reload.rfa",
+        "tech_ar_run.rfa", "tech_ar_stand.rfa", "tech_ar_walk.rfa", "tech_ft_crouch.rfa",
+        "tech_ft_crouch_walk.rfa", "tech_ft_fire.rfa", "Tech_FT_fire_ALT.rfa", "tech_ft_reload.rfa",
+        "tech_ft_run.rfa", "tech_ft_stand.rfa", "tech_ft_walk.rfa", "tech_gren_attack.rfa",
+        "tech_gren_crouch.rfa", "tech_gren_crouch_walk.rfa", "tech_gren_run.rfa", "tech_gren_stand.rfa",
+        "tech_gren_throw.rfa", "tech_gren_throw_alt.rfa", "tech_gren_walk.rfa", "tech_hmac_crouch.rfa",
+        "tech_hmac_crouch_walk.rfa", "tech_hmac_fire.rfa", "tech_hmac_reload.rfa", "tech_hmac_run.rfa",
+        "tech_hmac_stand.rfa", "tech_hmac_walk.rfa", "tech_mp_crouch.rfa", "tech_mp_crouch_walk.rfa",
+        "tech_mp_fire.rfa", "tech_mp_reload.rfa", "tech_mp_run.rfa", "tech_mp_stand.rfa",
+        "tech_mp_walk.rfa", "tech_rc_toss.rfa", "tech_RL_crouch.rfa", "tech_RL_crouch_walk.rfa",
+        "tech_RL_fire.rfa", "tech_RL_reload.rfa", "tech_RL_run.rfa", "tech_RL_stand.rfa",
+        "tech_RL_walk.rfa", "tech_rr_crouch.rfa", "tech_rr_crouch_walk.rfa", "tech_rr_reload.rfa",
+        "tech_rr_run.rfa", "tech_rr_stand.rfa", "tech_rr_walk.rfa", "tech_rs_attack.rfa",
+        "tech_rs_attack_alt.rfa", "tech_rs_crouch.rfa", "tech_rs_crouch_walk.rfa", "tech_rs_reload.rfa",
+        "tech_rs_run.rfa", "tech_rs_stand.rfa", "tech_rs_walk.rfa", "tech_rshield_crouch.rfa",
+        "tech_rshield_crouch_walk.rfa", "tech_rshield_fire.rfa", "tech_rshield_run.rfa", "tech_rshield_stand.rfa",
+        "tech_rshield_walk.rfa", "tech_sar_crouch.rfa", "tech_sar_crouch_walk.rfa", "tech_sar_fire.rfa",
+        "tech_sar_reload.rfa", "tech_sar_run.rfa", "tech_sar_stand.rfa", "tech_sar_walk.rfa",
+        "tech_sg_crouch.rfa", "tech_sg_crouch_walk.rfa", "tech_sg_fire.rfa", "tech_sg_fire_auto.rfa",
+        "tech_sg_reload.rfa", "tech_sg_run.rfa", "tech_sg_stand.rfa", "tech_sg_walk.rfa",
+        "tech_smc_crouch.rfa", "tech_smc_crouch_walk.rfa", "tech_smc_fire_reload.rfa", "tech_smc_stand.rfa",
+        "tech_smc_walk.rfa", "tech_SR_crouch.rfa", "tech_SR_crouch_walk.rfa", "tech_SR_fire.rfa",
+        "tech_SR_reload.rfa", "tech_SR_run.rfa", "tech_SR_stand.rfa", "tech_SR_walk.rfa",
+        "Tech_swim_stand.rfa", "Tech_swim_walk.rfa", "usci_talk.rfa", "usci_talk_short.rfa",
+    ],
+    "medic1.v3c": [  # MP: medic1 / multi_civilian, 129 anims
+        "medc_talk.rfa", "medc_talk_short.rfa", "medic01_heal_01.rfa", "tech01_blast_forwards.rfa",
+        "tech01_corpse_carry.rfa", "tech01_cower_loop.rfa", "tech01_crouch.rfa", "tech01_death_corpse_drop.rfa",
+        "tech01_death_crouch.rfa", "tech01_death_generic.rfa", "tech01_death_head_back.rfa", "tech01_death_head_fore.rfa",
+        "tech01_death_leg_L.rfa", "tech01_death_leg_R.rfa", "tech01_death_spin_fall_L.rfa", "tech01_death_torso_forward.rfa",
+        "tech01_flinch.rfa", "tech01_flinch_back.rfa", "tech01_flinch_leg_L.rfa", "tech01_flinch_leg_R.rfa",
+        "tech01_freefall.rfa", "tech01_hit_alarm.rfa", "tech01_idle_01.rfa", "tech01_run.rfa",
+        "tech01_run_flail.rfa", "tech01_run_flee.rfa", "tech01_stand.rfa", "tech01_walk.rfa",
+        "tech_12mm_crouch.rfa", "tech_12mm_crouch_walk.rfa", "tech_12mm_fire.rfa", "tech_12mm_reload.rfa",
+        "tech_12mm_run.rfa", "tech_12mm_stand.rfa", "tech_12mm_walk.rfa", "tech_ar_crouch.rfa",
+        "tech_ar_crouch_walk.rfa", "tech_ar_fire.rfa", "tech_ar_reload.rfa", "tech_ar_run.rfa",
+        "tech_ar_stand.rfa", "tech_ar_walk.rfa", "tech_ft_crouch.rfa", "tech_ft_crouch_walk.rfa",
+        "tech_ft_fire.rfa", "Tech_FT_fire_ALT.rfa", "tech_ft_reload.rfa", "tech_ft_run.rfa",
+        "tech_ft_stand.rfa", "tech_ft_walk.rfa", "tech_gren_attack.rfa", "tech_gren_crouch.rfa",
+        "tech_gren_crouch_walk.rfa", "tech_gren_run.rfa", "tech_gren_stand.rfa", "tech_gren_throw.rfa",
+        "tech_gren_throw_alt.rfa", "tech_gren_walk.rfa", "tech_hmac_crouch.rfa", "tech_hmac_crouch_walk.rfa",
+        "tech_hmac_fire.rfa", "tech_hmac_reload.rfa", "tech_hmac_run.rfa", "tech_hmac_stand.rfa",
+        "tech_hmac_walk.rfa", "tech_mp_crouch.rfa", "tech_mp_crouch_walk.rfa", "tech_mp_fire.rfa",
+        "tech_mp_reload.rfa", "tech_mp_run.rfa", "tech_mp_stand.rfa", "tech_mp_walk.rfa",
+        "tech_rc_toss.rfa", "tech_RL_crouch.rfa", "tech_RL_crouch_walk.rfa", "tech_RL_fire.rfa",
+        "tech_RL_reload.rfa", "tech_RL_run.rfa", "tech_RL_stand.rfa", "tech_RL_walk.rfa",
+        "tech_rr_crouch.rfa", "tech_rr_crouch_walk.rfa", "tech_rr_reload.rfa", "tech_rr_run.rfa",
+        "tech_rr_stand.rfa", "tech_rr_walk.rfa", "tech_rs_attack.rfa", "tech_rs_attack_alt.rfa",
+        "tech_rs_crouch.rfa", "tech_rs_crouch_walk.rfa", "tech_rs_reload.rfa", "tech_rs_run.rfa",
+        "tech_rs_stand.rfa", "tech_rs_walk.rfa", "tech_rshield_crouch.rfa", "tech_rshield_crouch_walk.rfa",
+        "tech_rshield_fire.rfa", "tech_rshield_run.rfa", "tech_rshield_stand.rfa", "tech_rshield_walk.rfa",
+        "tech_sar_crouch.rfa", "tech_sar_crouch_walk.rfa", "tech_sar_fire.rfa", "tech_sar_reload.rfa",
+        "tech_sar_run.rfa", "tech_sar_stand.rfa", "tech_sar_walk.rfa", "tech_sg_crouch.rfa",
+        "tech_sg_crouch_walk.rfa", "tech_sg_fire.rfa", "tech_sg_fire_auto.rfa", "tech_sg_reload.rfa",
+        "tech_sg_run.rfa", "tech_sg_stand.rfa", "tech_sg_walk.rfa", "tech_smc_crouch.rfa",
+        "tech_smc_crouch_walk.rfa", "tech_smc_fire_reload.rfa", "tech_smc_stand.rfa", "tech_smc_walk.rfa",
+        "tech_SR_crouch.rfa", "tech_SR_crouch_walk.rfa", "tech_SR_fire.rfa", "tech_SR_reload.rfa",
+        "tech_SR_run.rfa", "tech_SR_stand.rfa", "tech_SR_walk.rfa", "Tech_swim_stand.rfa",
+        "Tech_swim_walk.rfa",
+    ],
+    "env_scientist.v3c": [  # MP: env_scientist1 / multi_civilian, 133 anims
+        "esci_cower.rfa", "esci_crouch.rfa", "esci_death_chest_forwards.rfa", "esci_death_generic.rfa",
+        "esci_flinch_back.rfa", "esci_flinch_chest.rfa", "esci_flinch_leg_left.rfa", "esci_flinch_leg_right.rfa",
+        "esci_idle.rfa", "esci_push_button.rfa", "esci_run.rfa", "esci_run_flee.rfa",
+        "esci_stand.rfa", "esci_walk.rfa", "tech01_blast_back.rfa", "tech01_blast_forwards.rfa",
+        "tech01_corpse_carry.rfa", "tech01_death_corpse_drop.rfa", "tech01_death_crouch.rfa", "tech01_death_generic.rfa",
+        "tech01_death_head_back.rfa", "tech01_death_head_fore.rfa", "tech01_death_leg_L.rfa", "tech01_death_leg_R.rfa",
+        "tech01_death_spin_fall_L.rfa", "tech01_death_torso_forward.rfa", "tech01_flinch.rfa", "tech01_flinch_back.rfa",
+        "tech01_flinch_leg_L.rfa", "tech01_flinch_leg_R.rfa", "tech01_freefall.rfa", "tech01_run_flail.rfa",
+        "tech_12mm_crouch.rfa", "tech_12mm_crouch_walk.rfa", "tech_12mm_fire.rfa", "tech_12mm_reload.rfa",
+        "tech_12mm_run.rfa", "tech_12mm_stand.rfa", "tech_12mm_walk.rfa", "tech_ar_crouch.rfa",
+        "tech_ar_crouch_walk.rfa", "tech_ar_fire.rfa", "tech_ar_reload.rfa", "tech_ar_run.rfa",
+        "tech_ar_stand.rfa", "tech_ar_walk.rfa", "tech_ft_crouch.rfa", "tech_ft_crouch_walk.rfa",
+        "tech_ft_fire.rfa", "Tech_FT_fire_ALT.rfa", "tech_ft_reload.rfa", "tech_ft_run.rfa",
+        "tech_ft_stand.rfa", "tech_ft_walk.rfa", "tech_gren_attack.rfa", "tech_gren_crouch.rfa",
+        "tech_gren_crouch_walk.rfa", "tech_gren_run.rfa", "tech_gren_stand.rfa", "tech_gren_throw.rfa",
+        "tech_gren_throw_alt.rfa", "tech_gren_walk.rfa", "tech_hmac_crouch.rfa", "tech_hmac_crouch_walk.rfa",
+        "tech_hmac_fire.rfa", "tech_hmac_reload.rfa", "tech_hmac_run.rfa", "tech_hmac_stand.rfa",
+        "tech_hmac_walk.rfa", "tech_mp_crouch.rfa", "tech_mp_crouch_walk.rfa", "tech_mp_fire.rfa",
+        "tech_mp_reload.rfa", "tech_mp_run.rfa", "tech_mp_stand.rfa", "tech_mp_walk.rfa",
+        "tech_rc_toss.rfa", "tech_RL_crouch.rfa", "tech_RL_crouch_walk.rfa", "tech_RL_fire.rfa",
+        "tech_RL_reload.rfa", "tech_RL_run.rfa", "tech_RL_stand.rfa", "tech_RL_walk.rfa",
+        "tech_rr_crouch.rfa", "tech_rr_crouch_walk.rfa", "tech_rr_reload.rfa", "tech_rr_run.rfa",
+        "tech_rr_stand.rfa", "tech_rr_walk.rfa", "tech_rs_attack.rfa", "tech_rs_attack_alt.rfa",
+        "tech_rs_crouch.rfa", "tech_rs_crouch_walk.rfa", "tech_rs_reload.rfa", "tech_rs_run.rfa",
+        "tech_rs_stand.rfa", "tech_rs_walk.rfa", "tech_rshield_crouch.rfa", "tech_rshield_crouch_walk.rfa",
+        "tech_rshield_fire.rfa", "tech_rshield_run.rfa", "tech_rshield_stand.rfa", "tech_rshield_walk.rfa",
+        "tech_sar_crouch.rfa", "tech_sar_crouch_walk.rfa", "tech_sar_fire.rfa", "tech_sar_reload.rfa",
+        "tech_sar_run.rfa", "tech_sar_stand.rfa", "tech_sar_walk.rfa", "tech_sg_crouch.rfa",
+        "tech_sg_crouch_walk.rfa", "tech_sg_fire.rfa", "tech_sg_fire_auto.rfa", "tech_sg_reload.rfa",
+        "tech_sg_run.rfa", "tech_sg_stand.rfa", "tech_sg_walk.rfa", "tech_smc_crouch.rfa",
+        "tech_smc_crouch_walk.rfa", "tech_smc_fire_reload.rfa", "tech_smc_stand.rfa", "tech_smc_walk.rfa",
+        "tech_SR_crouch.rfa", "tech_SR_crouch_walk.rfa", "tech_SR_fire.rfa", "tech_SR_reload.rfa",
+        "tech_SR_run.rfa", "tech_SR_stand.rfa", "tech_SR_walk.rfa", "Tech_swim_stand.rfa",
+        "Tech_swim_walk.rfa",
+    ],
+    "comp_tech.v3c": [  # MP: hendrix / multi_civilian, 128 anims
+        "hndx_talk.rfa", "hndx_talk_short.rfa", "tech01_blast_forwards.rfa", "tech01_corpse_carry.rfa",
+        "tech01_cower_loop.rfa", "tech01_crouch.rfa", "tech01_death_corpse_drop.rfa", "tech01_death_crouch.rfa",
+        "tech01_death_generic.rfa", "tech01_death_head_back.rfa", "tech01_death_head_fore.rfa", "tech01_death_leg_L.rfa",
+        "tech01_death_leg_R.rfa", "tech01_death_spin_fall_L.rfa", "tech01_death_torso_forward.rfa", "tech01_flinch.rfa",
+        "tech01_flinch_back.rfa", "tech01_flinch_leg_L.rfa", "tech01_flinch_leg_R.rfa", "tech01_freefall.rfa",
+        "tech01_hit_alarm.rfa", "tech01_idle_01.rfa", "tech01_run.rfa", "tech01_run_flail.rfa",
+        "tech01_run_flee.rfa", "tech01_stand.rfa", "tech01_walk.rfa", "tech_12mm_crouch.rfa",
+        "tech_12mm_crouch_walk.rfa", "tech_12mm_fire.rfa", "tech_12mm_reload.rfa", "tech_12mm_run.rfa",
+        "tech_12mm_stand.rfa", "tech_12mm_walk.rfa", "tech_ar_crouch.rfa", "tech_ar_crouch_walk.rfa",
+        "tech_ar_fire.rfa", "tech_ar_reload.rfa", "tech_ar_run.rfa", "tech_ar_stand.rfa",
+        "tech_ar_walk.rfa", "tech_ft_crouch.rfa", "tech_ft_crouch_walk.rfa", "tech_ft_fire.rfa",
+        "Tech_FT_fire_ALT.rfa", "tech_ft_reload.rfa", "tech_ft_run.rfa", "tech_ft_stand.rfa",
+        "tech_ft_walk.rfa", "tech_gren_attack.rfa", "tech_gren_crouch.rfa", "tech_gren_crouch_walk.rfa",
+        "tech_gren_run.rfa", "tech_gren_stand.rfa", "tech_gren_throw.rfa", "tech_gren_throw_alt.rfa",
+        "tech_gren_walk.rfa", "tech_hmac_crouch.rfa", "tech_hmac_crouch_walk.rfa", "tech_hmac_fire.rfa",
+        "tech_hmac_reload.rfa", "tech_hmac_run.rfa", "tech_hmac_stand.rfa", "tech_hmac_walk.rfa",
+        "tech_mp_crouch.rfa", "tech_mp_crouch_walk.rfa", "tech_mp_fire.rfa", "tech_mp_reload.rfa",
+        "tech_mp_run.rfa", "tech_mp_stand.rfa", "tech_mp_walk.rfa", "tech_rc_toss.rfa",
+        "tech_RL_crouch.rfa", "tech_RL_crouch_walk.rfa", "tech_RL_fire.rfa", "tech_RL_reload.rfa",
+        "tech_RL_run.rfa", "tech_RL_stand.rfa", "tech_RL_walk.rfa", "tech_rr_crouch.rfa",
+        "tech_rr_crouch_walk.rfa", "tech_rr_reload.rfa", "tech_rr_run.rfa", "tech_rr_stand.rfa",
+        "tech_rr_walk.rfa", "tech_rs_attack.rfa", "tech_rs_attack_alt.rfa", "tech_rs_crouch.rfa",
+        "tech_rs_crouch_walk.rfa", "tech_rs_reload.rfa", "tech_rs_run.rfa", "tech_rs_stand.rfa",
+        "tech_rs_walk.rfa", "tech_rshield_crouch.rfa", "tech_rshield_crouch_walk.rfa", "tech_rshield_fire.rfa",
+        "tech_rshield_run.rfa", "tech_rshield_stand.rfa", "tech_rshield_walk.rfa", "tech_sar_crouch.rfa",
+        "tech_sar_crouch_walk.rfa", "tech_sar_fire.rfa", "tech_sar_reload.rfa", "tech_sar_run.rfa",
+        "tech_sar_stand.rfa", "tech_sar_walk.rfa", "tech_sg_crouch.rfa", "tech_sg_crouch_walk.rfa",
+        "tech_sg_fire.rfa", "tech_sg_fire_auto.rfa", "tech_sg_reload.rfa", "tech_sg_run.rfa",
+        "tech_sg_stand.rfa", "tech_sg_walk.rfa", "tech_smc_crouch.rfa", "tech_smc_crouch_walk.rfa",
+        "tech_smc_fire_reload.rfa", "tech_smc_stand.rfa", "tech_smc_walk.rfa", "tech_SR_crouch.rfa",
+        "tech_SR_crouch_walk.rfa", "tech_SR_fire.rfa", "tech_SR_reload.rfa", "tech_SR_run.rfa",
+        "tech_SR_stand.rfa", "tech_SR_walk.rfa", "Tech_swim_stand.rfa", "Tech_swim_walk.rfa",
+    ],
+    "admin_male.v3c": [  # MP: gryphon / multi_civilian, 128 anims
+        "admin_male_talk.rfa", "admin_male_talk_short.rfa", "tech01_blast_forwards.rfa", "tech01_corpse_carry.rfa",
+        "tech01_cower_loop.rfa", "tech01_crouch.rfa", "tech01_death_corpse_drop.rfa", "tech01_death_crouch.rfa",
+        "tech01_death_generic.rfa", "tech01_death_head_back.rfa", "tech01_death_head_fore.rfa", "tech01_death_leg_L.rfa",
+        "tech01_death_leg_R.rfa", "tech01_death_spin_fall_L.rfa", "tech01_death_torso_forward.rfa", "tech01_flinch.rfa",
+        "tech01_flinch_back.rfa", "tech01_flinch_leg_L.rfa", "tech01_flinch_leg_R.rfa", "tech01_freefall.rfa",
+        "tech01_hit_alarm.rfa", "tech01_idle_01.rfa", "tech01_run.rfa", "tech01_run_flail.rfa",
+        "tech01_run_flee.rfa", "tech01_stand.rfa", "tech01_walk.rfa", "tech_12mm_crouch.rfa",
+        "tech_12mm_crouch_walk.rfa", "tech_12mm_fire.rfa", "tech_12mm_reload.rfa", "tech_12mm_run.rfa",
+        "tech_12mm_stand.rfa", "tech_12mm_walk.rfa", "tech_ar_crouch.rfa", "tech_ar_crouch_walk.rfa",
+        "tech_ar_fire.rfa", "tech_ar_reload.rfa", "tech_ar_run.rfa", "tech_ar_stand.rfa",
+        "tech_ar_walk.rfa", "tech_ft_crouch.rfa", "tech_ft_crouch_walk.rfa", "tech_ft_fire.rfa",
+        "Tech_FT_fire_ALT.rfa", "tech_ft_reload.rfa", "tech_ft_run.rfa", "tech_ft_stand.rfa",
+        "tech_ft_walk.rfa", "tech_gren_attack.rfa", "tech_gren_crouch.rfa", "tech_gren_crouch_walk.rfa",
+        "tech_gren_run.rfa", "tech_gren_stand.rfa", "tech_gren_throw.rfa", "tech_gren_throw_alt.rfa",
+        "tech_gren_walk.rfa", "tech_hmac_crouch.rfa", "tech_hmac_crouch_walk.rfa", "tech_hmac_fire.rfa",
+        "tech_hmac_reload.rfa", "tech_hmac_run.rfa", "tech_hmac_stand.rfa", "tech_hmac_walk.rfa",
+        "tech_mp_crouch.rfa", "tech_mp_crouch_walk.rfa", "tech_mp_fire.rfa", "tech_mp_reload.rfa",
+        "tech_mp_run.rfa", "tech_mp_stand.rfa", "tech_mp_walk.rfa", "tech_rc_toss.rfa",
+        "tech_RL_crouch.rfa", "tech_RL_crouch_walk.rfa", "tech_RL_fire.rfa", "tech_RL_reload.rfa",
+        "tech_RL_run.rfa", "tech_RL_stand.rfa", "tech_RL_walk.rfa", "tech_rr_crouch.rfa",
+        "tech_rr_crouch_walk.rfa", "tech_rr_reload.rfa", "tech_rr_run.rfa", "tech_rr_stand.rfa",
+        "tech_rr_walk.rfa", "tech_rs_attack.rfa", "tech_rs_attack_alt.rfa", "tech_rs_crouch.rfa",
+        "tech_rs_crouch_walk.rfa", "tech_rs_reload.rfa", "tech_rs_run.rfa", "tech_rs_stand.rfa",
+        "tech_rs_walk.rfa", "tech_rshield_crouch.rfa", "tech_rshield_crouch_walk.rfa", "tech_rshield_fire.rfa",
+        "tech_rshield_run.rfa", "tech_rshield_stand.rfa", "tech_rshield_walk.rfa", "tech_sar_crouch.rfa",
+        "tech_sar_crouch_walk.rfa", "tech_sar_fire.rfa", "tech_sar_reload.rfa", "tech_sar_run.rfa",
+        "tech_sar_stand.rfa", "tech_sar_walk.rfa", "tech_sg_crouch.rfa", "tech_sg_crouch_walk.rfa",
+        "tech_sg_fire.rfa", "tech_sg_fire_auto.rfa", "tech_sg_reload.rfa", "tech_sg_run.rfa",
+        "tech_sg_stand.rfa", "tech_sg_walk.rfa", "tech_smc_crouch.rfa", "tech_smc_crouch_walk.rfa",
+        "tech_smc_fire_reload.rfa", "tech_smc_stand.rfa", "tech_smc_walk.rfa", "tech_SR_crouch.rfa",
+        "tech_SR_crouch_walk.rfa", "tech_SR_fire.rfa", "tech_SR_reload.rfa", "tech_SR_run.rfa",
+        "tech_SR_stand.rfa", "tech_SR_walk.rfa", "Tech_swim_stand.rfa", "Tech_swim_walk.rfa",
+    ],
+    "admin_male2.v3c": [  # MP: fat_admin / multi_civilian, 135 anims
+        "adm2_cower.rfa", "adm2_death_chest_forwards.rfa", "adm2_death_generic.rfa", "adm2_flinch_back.rfa",
+        "adm2_flinch_front.rfa", "adm2_flinch_leg_left.rfa", "adm2_flinch_leg_right.rfa", "adm2_idle.rfa",
+        "adm2_run.rfa", "adm2_run_flail.rfa", "adm2_run_flee.rfa", "adm2_stand.rfa",
+        "adm2_talk.rfa", "adm2_talk_short.rfa", "adm2_walk.rfa", "tech01_blast_back.rfa",
+        "tech01_blast_forwards.rfa", "tech01_corpse_carry.rfa", "tech01_crouch.rfa", "tech01_death_corpse_drop.rfa",
+        "tech01_death_crouch.rfa", "tech01_death_generic.rfa", "tech01_death_head_back.rfa", "tech01_death_head_fore.rfa",
+        "tech01_death_leg_L.rfa", "tech01_death_leg_R.rfa", "tech01_death_spin_fall_L.rfa", "tech01_death_torso_forward.rfa",
+        "tech01_flinch.rfa", "tech01_flinch_back.rfa", "tech01_flinch_leg_L.rfa", "tech01_flinch_leg_R.rfa",
+        "tech01_freefall.rfa", "tech01_hit_alarm.rfa", "tech_12mm_crouch.rfa", "tech_12mm_crouch_walk.rfa",
+        "tech_12mm_fire.rfa", "tech_12mm_reload.rfa", "tech_12mm_run.rfa", "tech_12mm_stand.rfa",
+        "tech_12mm_walk.rfa", "tech_ar_crouch.rfa", "tech_ar_crouch_walk.rfa", "tech_ar_fire.rfa",
+        "tech_ar_reload.rfa", "tech_ar_run.rfa", "tech_ar_stand.rfa", "tech_ar_walk.rfa",
+        "tech_ft_crouch.rfa", "tech_ft_crouch_walk.rfa", "tech_ft_fire.rfa", "Tech_FT_fire_ALT.rfa",
+        "tech_ft_reload.rfa", "tech_ft_run.rfa", "tech_ft_stand.rfa", "tech_ft_walk.rfa",
+        "tech_gren_attack.rfa", "tech_gren_crouch.rfa", "tech_gren_crouch_walk.rfa", "tech_gren_run.rfa",
+        "tech_gren_stand.rfa", "tech_gren_throw.rfa", "tech_gren_throw_alt.rfa", "tech_gren_walk.rfa",
+        "tech_hmac_crouch.rfa", "tech_hmac_crouch_walk.rfa", "tech_hmac_fire.rfa", "tech_hmac_reload.rfa",
+        "tech_hmac_run.rfa", "tech_hmac_stand.rfa", "tech_hmac_walk.rfa", "tech_mp_crouch.rfa",
+        "tech_mp_crouch_walk.rfa", "tech_mp_fire.rfa", "tech_mp_reload.rfa", "tech_mp_run.rfa",
+        "tech_mp_stand.rfa", "tech_mp_walk.rfa", "tech_rc_toss.rfa", "tech_RL_crouch.rfa",
+        "tech_RL_crouch_walk.rfa", "tech_RL_fire.rfa", "tech_RL_reload.rfa", "tech_RL_run.rfa",
+        "tech_RL_stand.rfa", "tech_RL_walk.rfa", "tech_rr_crouch.rfa", "tech_rr_crouch_walk.rfa",
+        "tech_rr_reload.rfa", "tech_rr_run.rfa", "tech_rr_stand.rfa", "tech_rr_walk.rfa",
+        "tech_rs_attack.rfa", "tech_rs_attack_alt.rfa", "tech_rs_crouch.rfa", "tech_rs_crouch_walk.rfa",
+        "tech_rs_reload.rfa", "tech_rs_run.rfa", "tech_rs_stand.rfa", "tech_rs_walk.rfa",
+        "tech_rshield_crouch.rfa", "tech_rshield_crouch_walk.rfa", "tech_rshield_fire.rfa", "tech_rshield_run.rfa",
+        "tech_rshield_stand.rfa", "tech_rshield_walk.rfa", "tech_sar_crouch.rfa", "tech_sar_crouch_walk.rfa",
+        "tech_sar_fire.rfa", "tech_sar_reload.rfa", "tech_sar_run.rfa", "tech_sar_stand.rfa",
+        "tech_sar_walk.rfa", "tech_sg_crouch.rfa", "tech_sg_crouch_walk.rfa", "tech_sg_fire.rfa",
+        "tech_sg_fire_auto.rfa", "tech_sg_reload.rfa", "tech_sg_run.rfa", "tech_sg_stand.rfa",
+        "tech_sg_walk.rfa", "tech_smc_crouch.rfa", "tech_smc_crouch_walk.rfa", "tech_smc_fire_reload.rfa",
+        "tech_smc_stand.rfa", "tech_smc_walk.rfa", "tech_SR_crouch.rfa", "tech_SR_crouch_walk.rfa",
+        "tech_SR_fire.rfa", "tech_SR_reload.rfa", "tech_SR_run.rfa", "tech_SR_stand.rfa",
+        "tech_SR_walk.rfa", "Tech_swim_stand.rfa", "Tech_swim_walk.rfa",
+    ],
+}
+
+
 def _lookup_required_anims(model_filename):
     """Look up required animations for a model from the stock RF database.
-    Returns list of .rfa filenames or empty list if model not found."""
+    Merges SP (_RF_ANIM_DB) and MP (_RF_MP_ANIM_DB) animations for characters
+    that appear in both. Returns deduplicated list of .rfa filenames."""
     key = os.path.basename(model_filename).lower()
-    # Try exact match first, then without extension variants
-    if key in _RF_ANIM_DB:
-        return _RF_ANIM_DB[key]
-    # Try .vcm → .v3c
-    for ext in ['.vcm', '.v3d']:
-        alt = key.replace(ext, '.v3c')
-        if alt in _RF_ANIM_DB:
-            return _RF_ANIM_DB[alt]
-    return []
+
+    collected = []
+    seen = set()
+
+    def add_from(db, k):
+        for anim in db.get(k, []):
+            lc = anim.lower()
+            if lc not in seen:
+                seen.add(lc)
+                collected.append(anim)
+
+    # Exact match in both DBs
+    add_from(_RF_ANIM_DB, key)
+    add_from(_RF_MP_ANIM_DB, key)
+
+    # Try .vcm/.v3d → .v3c variants
+    if not collected:
+        for ext in ['.vcm', '.v3d']:
+            alt = key.replace(ext, '.v3c')
+            add_from(_RF_ANIM_DB, alt)
+            add_from(_RF_MP_ANIM_DB, alt)
+            if collected:
+                break
+
+    return collected
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1733,6 +2625,13 @@ def _gather_chunks(mesh_obj, bone_names):
     chunks = []
     for mi in sorted(mat_tris.keys()):
         faces = mat_tris[mi]
+
+        # Check if material is double-sided (backface culling disabled)
+        face_flags = 0
+        if mi < len(mesh_obj.data.materials) and mesh_obj.data.materials[mi]:
+            mat = mesh_obj.data.materials[mi]
+            if hasattr(mat, 'use_backface_culling') and not mat.use_backface_culling:
+                face_flags = 0x20  # DOUBLE_SIDED
 
         vert_map = {}
         positions = []
@@ -1782,13 +2681,19 @@ def _gather_chunks(mesh_obj, bone_names):
                     vg_weights.sort(key=lambda x: -x[1])
                     vg_weights = vg_weights[:4]
 
-                    # Convert to 0-255 byte range (multiply by 255, no forced normalization)
-                    # Stock RF files don't always sum to 255 — engine normalizes at runtime
+                    # Convert to 0-255 byte range, normalized to sum=255
+                    # Redux normalizes: divide by sum, multiply by 255, adjust slot 0
                     byte_bones = [0xFF, 0xFF, 0xFF, 0xFF]  # 0xFF = unused (Redux/stock convention)
                     byte_weights = [0, 0, 0, 0]
-                    for wi, (bi, w) in enumerate(vg_weights):
-                        byte_bones[wi] = min(bi, 255)
-                        byte_weights[wi] = min(255, max(0, int(round(w * 255.0))))
+                    if vg_weights:
+                        w_sum = sum(w for _, w in vg_weights) or 1.0
+                        for wi, (bi, w) in enumerate(vg_weights):
+                            byte_bones[wi] = min(bi, 255)
+                            byte_weights[wi] = max(1, min(255, int(round(w / w_sum * 255.0))))
+                        # Adjust slot 0 so sum is exactly 255
+                        bw_sum = sum(byte_weights)
+                        if bw_sum > 0 and bw_sum != 255:
+                            byte_weights[0] = max(1, min(255, byte_weights[0] + 255 - bw_sum))
 
                     bone_links.append((tuple(byte_weights), tuple(byte_bones)))
 
@@ -1804,6 +2709,7 @@ def _gather_chunks(mesh_obj, bone_names):
             'uvs': uvs,
             'triangles': triangles,
             'bone_links': bone_links,
+            'face_flags': face_flags,
         })
 
     bm.free()
@@ -1850,8 +2756,9 @@ def _build_data_block(chunks, is_character, prop_points=None):
         db = bytearray(_pad16(db))
 
         # Triangles (3 indices + 1 flags uint16 = 8 bytes each)
+        face_flags = chunk.get('face_flags', 0)
         for i0, i1, i2 in chunk['triangles']:
-            db += struct.pack("<4H", i0, i1, i2, 0)
+            db += struct.pack("<4H", i0, i1, i2, face_flags)
         db = bytearray(_pad16(db))
 
         # Samepos (cv * 2 bytes of zeros — Redux writes this, engine expects it)
@@ -1972,6 +2879,47 @@ def _export_v3c(mesh_obj, arm_obj, filepath, bones_data, cspheres_data=None, pro
     if not chunks:
         raise ValueError("No mesh data to export")
 
+    # Split chunks that exceed V3C limits
+    # Alloc fields are uint16, storing byte sizes (nv*12 for positions)
+    # Max verts per chunk: 65535 / 12 = 5461
+    MAX_CHUNK_VERTS = 5400  # conservative limit for uint16 alloc fields
+    split_chunks = []
+    for chunk in chunks:
+        if len(chunk['positions']) <= MAX_CHUNK_VERTS:
+            split_chunks.append(chunk)
+        else:
+            # Split by iterating triangles and building sub-chunks
+            src = chunk
+            vert_remap = {}
+            cur = {'material_index': src['material_index'], 'positions': [], 'normals': [],
+                   'uvs': [], 'triangles': [], 'bone_links': [], 'face_flags': src.get('face_flags', 0)}
+
+            for tri in src['triangles']:
+                # Check if adding this triangle would overflow
+                new_verts = sum(1 for idx in tri if idx not in vert_remap)
+                if len(cur['positions']) + new_verts > MAX_CHUNK_VERTS and cur['triangles']:
+                    split_chunks.append(cur)
+                    vert_remap = {}
+                    cur = {'material_index': src['material_index'], 'positions': [], 'normals': [],
+                           'uvs': [], 'triangles': [], 'bone_links': [], 'face_flags': src.get('face_flags', 0)}
+
+                new_tri = []
+                for idx in tri:
+                    if idx not in vert_remap:
+                        new_idx = len(cur['positions'])
+                        vert_remap[idx] = new_idx
+                        cur['positions'].append(src['positions'][idx])
+                        cur['normals'].append(src['normals'][idx])
+                        cur['uvs'].append(src['uvs'][idx])
+                        if src['bone_links']:
+                            cur['bone_links'].append(src['bone_links'][idx])
+                    new_tri.append(vert_remap[idx])
+                cur['triangles'].append(tuple(new_tri))
+
+            if cur['triangles']:
+                split_chunks.append(cur)
+    chunks = split_chunks
+
     # Build data block
     data_block, chunk_infos = _build_data_block(chunks, is_character, prop_points_data)
 
@@ -1986,16 +2934,26 @@ def _export_v3c(mesh_obj, arm_obj, filepath, bones_data, cspheres_data=None, pro
     mat_flags = []
     for mat in mesh.materials:
         if mat:
-            # Get texture name — try to find an image texture node
+            # Get texture name — prefer the image connected to Base Color (if any)
             tex_name = mat.name + '.tga'
-            if mat.use_nodes:
-                for node in mat.node_tree.nodes:
-                    if node.type == 'TEX_IMAGE' and node.image:
-                        img_name = node.image.name
-                        if not img_name.lower().endswith('.tga'):
-                            img_name = os.path.splitext(img_name)[0] + '.tga'
-                        tex_name = img_name
-                        break
+            img = None
+            if mat.use_nodes and mat.node_tree:
+                bsdf = mat.node_tree.nodes.get('Principled BSDF')
+                if bsdf and 'Base Color' in bsdf.inputs:
+                    for link in bsdf.inputs['Base Color'].links:
+                        if link.from_node.type == 'TEX_IMAGE' and link.from_node.image:
+                            img = link.from_node.image
+                            break
+                if not img:
+                    for node in mat.node_tree.nodes:
+                        if node.type == 'TEX_IMAGE' and node.image:
+                            img = node.image
+                            break
+            if img:
+                img_name = img.name
+                if not img_name.lower().endswith('.tga'):
+                    img_name = os.path.splitext(img_name)[0] + '.tga'
+                tex_name = img_name
             materials.append(tex_name)
             # Material flags: base = 0x01 (stock/Redux standard), alpha adds 0x08
             flag = 0x01
@@ -2014,14 +2972,14 @@ def _export_v3c(mesh_obj, arm_obj, filepath, bones_data, cspheres_data=None, pro
             materials.append('default.tga')
             mat_flags.append(0x01)
 
-    # Build texture reference list — one per chunk, sequential indices
+    # Build texture reference list — one per chunk, material index as ID
     tex_refs = []
     for ci, chunk in enumerate(chunks):
         mi = chunk['material_index']
         if mi < len(materials):
-            tex_refs.append((ci, materials[mi]))
+            tex_refs.append((mi, materials[mi]))
         else:
-            tex_refs.append((ci, 'default.tga'))
+            tex_refs.append((0, 'default.tga'))
 
     # ── Compute bounding box ──
     all_pos = []
@@ -2176,6 +3134,18 @@ class RFCHAR_OT_ImportV3C(bpy.types.Operator, ImportHelper):
     )
 
     def execute(self, context):
+        # Ensure we're in Object mode before importing (prevents crashes)
+        try:
+            if context.active_object and context.active_object.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+        except Exception:
+            pass
+        # Deselect all to prevent context conflicts
+        try:
+            bpy.ops.object.select_all(action='DESELECT')
+        except Exception:
+            pass
+
         try:
             v3c = parse_v3c(self.filepath)
         except Exception as e:
@@ -2251,12 +3221,29 @@ class RFCHAR_OT_ImportV3C(bpy.types.Operator, ImportHelper):
         tt = sum(len(c['triangles']) for c in lod['chunks'])
 
         # Look up required animations from stock database
+        auto_loaded = 0
         if arm_obj:
             req_anims = _lookup_required_anims(self.filepath)
             if req_anims:
                 arm_obj['rf_required_anims'] = json.dumps(req_anims)
             # Store source filename for export default
             arm_obj['rf_source_file'] = os.path.basename(self.filepath)
+
+            # Auto-load required animations from master folder (if configured)
+            try:
+                if _get_auto_load_enabled(context) and req_anims:
+                    master_abs = _get_master_folder(context)
+                    if master_abs and os.path.isdir(master_abs):
+                        auto_loaded = _auto_load_anims_from_folder(
+                            arm_obj, req_anims, master_abs)
+                        if auto_loaded > 0:
+                            arm_obj['rf_anim_folder'] = master_abs
+                            context.scene['rf_last_anim_folder'] = master_abs
+                            # Leave armature in rest pose — no active animation
+                            if arm_obj.animation_data:
+                                arm_obj.animation_data.action = None
+            except Exception as e:
+                print(f"[RF Character] Auto-load skipped: {e}")
 
         info = f"Imported '{sm['name']}': {tv} verts, {tt} tris, {len(v3c['bones'])} bones, {num_lods} LOD{'s' if num_lods > 1 else ''}"
         if cs_count:
@@ -2266,7 +3253,21 @@ class RFCHAR_OT_ImportV3C(bpy.types.Operator, ImportHelper):
         if arm_obj and arm_obj.get('rf_required_anims'):
             req = json.loads(arm_obj['rf_required_anims'])
             info += f", {len(req)} required anims"
+        if auto_loaded:
+            info += f"  ·  auto-loaded {auto_loaded} anims"
         self.report({'INFO'}, info)
+
+        # Track recent files (scene-level, up to 10)
+        try:
+            recent = list(context.scene.get('rf_recent_v3c', []))
+            abs_path = os.path.abspath(self.filepath)
+            if abs_path in recent:
+                recent.remove(abs_path)
+            recent.insert(0, abs_path)
+            context.scene['rf_recent_v3c'] = recent[:10]
+        except Exception:
+            pass
+
         return {'FINISHED'}
 
 
@@ -2324,11 +3325,19 @@ class RFCHAR_OT_ImportRFA(bpy.types.Operator, ImportHelper):
                 self.report({'WARNING'}, f"Failed '{anim_name}': {e}")
                 failed += 1
 
-        # Activate last imported
-        if imported > 0 and arm_obj.animation_data.nla_tracks:
-            last_track = arm_obj.animation_data.nla_tracks[-1]
-            if last_track.strips:
-                arm_obj.animation_data.action = last_track.strips[0].action
+        # Leave armature in rest pose after loading — don't auto-activate any anim
+        if imported > 0 and arm_obj.animation_data:
+            try:
+                arm_obj.animation_data.action = None
+                for track in arm_obj.animation_data.nla_tracks:
+                    track.mute = True
+                for pb in arm_obj.pose.bones:
+                    pb.rotation_quaternion = (1, 0, 0, 0)
+                    pb.location = (0, 0, 0)
+                    pb.scale = (1, 1, 1)
+                context.scene.frame_set(context.scene.frame_current)
+            except Exception:
+                pass
 
         if imported == 1:
             self.report({'INFO'}, f"Imported '{os.path.splitext(os.path.basename(filepaths[0]))[0]}'")
@@ -2437,15 +3446,37 @@ class RFCHAR_OT_ImportSelectedAnims(bpy.types.Operator):
                 self.report({'WARNING'}, f"Failed '{item.name}': {e}")
                 failed += 1
 
-        if imported > 0 and arm_obj.animation_data.nla_tracks:
-            last_track = arm_obj.animation_data.nla_tracks[-1]
-            if last_track.strips:
-                arm_obj.animation_data.action = last_track.strips[0].action
+        # Leave armature in rest pose after loading — don't auto-activate any anim
+        if imported > 0 and arm_obj.animation_data:
+            try:
+                arm_obj.animation_data.action = None
+                for track in arm_obj.animation_data.nla_tracks:
+                    track.mute = True
+                for pb in arm_obj.pose.bones:
+                    pb.rotation_quaternion = (1, 0, 0, 0)
+                    pb.location = (0, 0, 0)
+                    pb.scale = (1, 1, 1)
+                context.scene.frame_set(context.scene.frame_current)
+            except Exception:
+                pass
 
         msg = f"Imported {imported} animation{'s' if imported != 1 else ''}"
         if failed:
             msg += f", {failed} failed"
         self.report({'INFO'}, msg)
+
+        # Remember folder for future auto-loads
+        if imported > 0:
+            try:
+                first_fp = next((i.filepath for i in scn.rfchar_anim_files if i.selected), None)
+                if first_fp:
+                    folder = os.path.dirname(first_fp)
+                    if os.path.isdir(folder):
+                        arm_obj['rf_anim_folder'] = folder
+                        context.scene['rf_last_anim_folder'] = folder
+            except Exception:
+                pass
+
         return {'FINISHED'}
 
 
@@ -2514,17 +3545,496 @@ class RFCHAR_OT_SetActiveAction(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _import_dae(filepath):
+    """Import a Collada .dae file (for Blender 5.0+ which removed built-in Collada support)."""
+    import xml.etree.ElementTree as ET
+
+    tree = ET.parse(filepath)
+    root = tree.getroot()
+
+    # Handle namespace
+    ns = ''
+    if root.tag.startswith('{'):
+        ns = root.tag.split('}')[0] + '}'
+
+    def find(elem, tag):
+        return elem.find(ns + tag)
+
+    def findall(elem, tag):
+        return elem.findall(ns + tag)
+
+    def find_path(elem, path):
+        parts = path.split('/')
+        current = elem
+        for p in parts:
+            current = find(current, p)
+            if current is None:
+                return None
+        return current
+
+    # Check up axis
+    up_axis_elem = find(root, 'asset')
+    up_axis = 'Y_UP'
+    if up_axis_elem is not None:
+        ua = find(up_axis_elem, 'up_axis')
+        if ua is not None and ua.text:
+            up_axis = ua.text.strip()
+
+    def apply_up_axis(x, y, z):
+        if up_axis == 'Z_UP':
+            return (x, -z, y)
+        return (x, y, z)
+
+    # Parse sources (float arrays) by id
+    lib_geom = find(root, 'library_geometries')
+    if lib_geom is None:
+        raise ValueError("No geometry found in DAE file")
+
+    created_objects = []
+
+    for geom in findall(lib_geom, 'geometry'):
+        geom_name = geom.get('name', geom.get('id', 'DAE_Mesh'))
+        mesh_elem = find(geom, 'mesh')
+        if mesh_elem is None:
+            continue
+
+        # Parse all sources
+        sources = {}
+        for source in findall(mesh_elem, 'source'):
+            sid = source.get('id', '')
+            fa = find(source, 'float_array')
+            if fa is not None and fa.text:
+                floats = [float(v) for v in fa.text.split()]
+                # Determine stride from accessor
+                tech = find(source, 'technique_common')
+                stride = 3
+                if tech is not None:
+                    acc = find(tech, 'accessor')
+                    if acc is not None:
+                        stride = int(acc.get('stride', '3'))
+                sources[sid] = (floats, stride)
+
+        # Parse vertices element (maps vertex semantic to position source)
+        vert_elem = find(mesh_elem, 'vertices')
+        vert_id = vert_elem.get('id', '') if vert_elem is not None else ''
+        vert_source_id = ''
+        if vert_elem is not None:
+            for inp in findall(vert_elem, 'input'):
+                if inp.get('semantic') == 'POSITION':
+                    vert_source_id = inp.get('source', '').lstrip('#')
+
+        # Process triangles and polylist elements
+        all_verts = []
+        all_faces = []
+        all_uvs = []
+        all_normals = []
+
+        for prim_tag in ('triangles', 'polylist', 'polygons'):
+            for prim in findall(mesh_elem, prim_tag):
+                # Parse inputs
+                inputs = []
+                max_offset = 0
+                for inp in findall(prim, 'input'):
+                    semantic = inp.get('semantic', '')
+                    source_id = inp.get('source', '').lstrip('#')
+                    offset = int(inp.get('offset', '0'))
+                    # Resolve VERTEX reference
+                    if semantic == 'VERTEX':
+                        source_id = vert_source_id
+                        semantic = 'POSITION'
+                    inputs.append((semantic, source_id, offset))
+                    max_offset = max(max_offset, offset)
+                stride = max_offset + 1
+
+                # Parse index data
+                p_elem = find(prim, 'p')
+                if p_elem is None or not p_elem.text:
+                    continue
+                indices = [int(v) for v in p_elem.text.split()]
+
+                # Parse vcount for polylist
+                if prim_tag == 'polylist':
+                    vc_elem = find(prim, 'vcount')
+                    if vc_elem is not None and vc_elem.text:
+                        vcounts = [int(v) for v in vc_elem.text.split()]
+                    else:
+                        continue
+                else:
+                    # Triangles: all faces have 3 verts
+                    nfaces = int(prim.get('count', '0'))
+                    vcounts = [3] * nfaces
+
+                # Find source references
+                pos_source = norm_source = uv_source = None
+                pos_offset = norm_offset = uv_offset = 0
+                for sem, sid, off in inputs:
+                    if sem == 'POSITION' and sid in sources:
+                        pos_source, _ = sources[sid]
+                        pos_offset = off
+                    elif sem == 'NORMAL' and sid in sources:
+                        norm_source, _ = sources[sid]
+                        norm_offset = off
+                    elif sem == 'TEXCOORD' and sid in sources:
+                        uv_source, uv_stride = sources[sid]
+                        uv_offset = off
+
+                if pos_source is None:
+                    continue
+
+                # Build mesh data
+                vert_map = {}
+                idx_ptr = 0
+
+                for vcount in vcounts:
+                    face_indices = []
+                    for vi in range(vcount):
+                        # Read indices for this vertex
+                        pi = indices[idx_ptr + pos_offset]
+                        ni = indices[idx_ptr + norm_offset] if norm_source else 0
+                        ti = indices[idx_ptr + uv_offset] if uv_source else 0
+                        idx_ptr += stride
+
+                        key = (pi, ni, ti)
+                        if key not in vert_map:
+                            local_idx = len(all_verts)
+                            vert_map[key] = local_idx
+
+                            px = pos_source[pi * 3]
+                            py = pos_source[pi * 3 + 1]
+                            pz = pos_source[pi * 3 + 2]
+                            all_verts.append(apply_up_axis(px, py, pz))
+
+                            if norm_source and ni * 3 + 2 < len(norm_source):
+                                nx = norm_source[ni * 3]
+                                ny = norm_source[ni * 3 + 1]
+                                nz = norm_source[ni * 3 + 2]
+                                all_normals.append(apply_up_axis(nx, ny, nz))
+
+                            if uv_source and ti * 2 + 1 < len(uv_source):
+                                all_uvs.append((uv_source[ti * 2], uv_source[ti * 2 + 1]))
+
+                        face_indices.append(vert_map[key])
+
+                    # Triangulate n-gons
+                    for fi in range(1, len(face_indices) - 1):
+                        all_faces.append((face_indices[0], face_indices[fi], face_indices[fi + 1]))
+
+        if not all_verts or not all_faces:
+            continue
+
+        # Create Blender mesh
+        mesh = bpy.data.meshes.new(geom_name)
+        mesh.from_pydata(all_verts, [], all_faces)
+        mesh.validate(clean_customdata=False)
+
+        # UVs
+        if all_uvs and len(all_uvs) == len(all_verts):
+            uv_layer = mesh.uv_layers.new(name="UVMap")
+            for li, loop in enumerate(mesh.loops):
+                vi = loop.vertex_index
+                if vi < len(all_uvs):
+                    uv_layer.data[li].uv = all_uvs[vi]
+
+        # Normals
+        if all_normals and len(all_normals) == len(all_verts):
+            try:
+                normals_list = [all_normals[l.vertex_index] if l.vertex_index < len(all_normals)
+                                else (0, 0, 1) for l in mesh.loops]
+                if hasattr(mesh, 'normals_split_custom_set'):
+                    mesh.normals_split_custom_set(normals_list)
+            except Exception:
+                pass
+
+        mesh.update()
+
+        obj = bpy.data.objects.new(geom_name, mesh)
+        bpy.context.collection.objects.link(obj)
+        bpy.context.view_layer.objects.active = obj
+        obj.select_set(True)
+        created_objects.append(obj)
+
+    if not created_objects:
+        raise ValueError("No mesh geometry found in DAE file")
+
+    return created_objects
+
+
+def _import_glm(filepath):
+    """Import a Ghoul 2 .glm mesh file (Jedi Academy/Jedi Outcast) — mesh only, no skeleton required."""
+    with open(filepath, 'rb') as f:
+        data = f.read()
+
+    # Header: ident(4) + version(4) + name(64) + animName(64) + animIndex(4) +
+    #         numBones(4) + numLODs(4) + ofsLODs(4) + numSurfaces(4) +
+    #         ofsSurfHierarchy(4) + ofsEnd(4) = 164 bytes
+    HEADER_SIZE = 164
+
+    ident = data[0:4]
+    if ident != b'2LGM':
+        raise ValueError(f"Not a GLM file (ident={ident})")
+
+    num_bones = struct.unpack_from("<i", data, 140)[0]
+    num_lods = struct.unpack_from("<i", data, 144)[0]
+    ofs_lods = struct.unpack_from("<i", data, 148)[0]
+    num_surfaces = struct.unpack_from("<i", data, 152)[0]
+    ofs_end = struct.unpack_from("<i", data, 160)[0]
+
+    # Surface data offsets table (starts right after header, one int per surface)
+    # Values are relative to HEADER_SIZE (byte 164)
+    sd_offsets = []
+    for si in range(num_surfaces):
+        sd_offsets.append(struct.unpack_from("<i", data, HEADER_SIZE + si * 4)[0])
+
+    # Read surface hierarchy: name(64) + flags(4) + shader(64) + shaderIndex(4) + parent(4) + numChildren(4) + children(4*n)
+    surf_names = []
+    surf_shaders = []
+    surf_flags = []
+    for si in range(num_surfaces):
+        pos = HEADER_SIZE + sd_offsets[si]
+        s_name = data[pos:pos+64].split(b'\x00')[0].decode('ascii', errors='replace')
+        s_flags = struct.unpack_from("<I", data, pos + 64)[0]
+        s_shader = data[pos+68:pos+68+64].split(b'\x00')[0].decode('ascii', errors='replace')
+        surf_names.append(s_name)
+        surf_shaders.append(s_shader)
+        surf_flags.append(s_flags)
+
+    # Try to auto-load .skin file for texture mapping (surface_name → texture_path)
+    skin_textures = {}
+    glm_dir = os.path.dirname(filepath)
+
+    # Search for any .skin file in the directory
+    skin_files = []
+    try:
+        for f in os.listdir(glm_dir):
+            if f.lower().endswith('.skin'):
+                skin_files.append(f)
+    except Exception:
+        pass
+
+    # Prefer model_default.skin, then any other
+    skin_files.sort(key=lambda f: (0 if 'default' in f.lower() else 1, f))
+
+    for skin_name in skin_files:
+        skin_path = os.path.join(glm_dir, skin_name)
+        try:
+            with open(skin_path, 'r') as sf:
+                for line in sf:
+                    line = line.strip()
+                    if ',' in line and not line.startswith('//'):
+                        parts = line.split(',', 1)
+                        surf = parts[0].strip()
+                        tex = parts[1].strip()
+                        if surf and tex:
+                            skin_textures[surf] = tex
+        except Exception:
+            pass
+        if skin_textures:
+            break
+
+    # Build a map of available texture files in the GLM directory
+    dir_textures = {}  # lowercase basename (no ext) → full path
+    try:
+        for f in os.listdir(glm_dir):
+            fl = f.lower()
+            if fl.endswith(('.jpg', '.jpeg', '.png', '.tga', '.dds', '.bmp')):
+                base = os.path.splitext(f)[0].lower()
+                dir_textures[base] = os.path.join(glm_dir, f)
+    except Exception:
+        pass
+
+    # Read LOD 0 surfaces
+    lod_start = ofs_lods
+    lod_ofs_end = struct.unpack_from("<i", data, lod_start)[0]
+
+    # Surface offsets table: numSurfaces ints, right after ofsEnd
+    # Offsets are relative to (lod_start + 4), i.e. after the ofsEnd field
+    surf_offsets = []
+    for si in range(num_surfaces):
+        soff = struct.unpack_from("<i", data, lod_start + 4 + si * 4)[0]
+        surf_offsets.append(soff)
+
+    created_objects = []
+
+    for si in range(num_surfaces):
+      try:
+        # Surface position: lod_start + 4 + surf_offsets[si]
+        surf_start = lod_start + 4 + surf_offsets[si]
+
+        # Bounds check
+        if surf_start + 40 > len(data):
+            continue
+
+        # Surface header: ident(4) + index(4) + ofsHeader(4) + numVerts(4) + ofsVerts(4) +
+        #   numTris(4) + ofsTris(4) + numBoneRefs(4) + ofsBoneRefs(4) + ofsEnd(4) = 40 bytes
+        _ident = struct.unpack_from("<i", data, surf_start)[0]
+        s_index = struct.unpack_from("<i", data, surf_start + 4)[0]
+        s_num_verts = struct.unpack_from("<i", data, surf_start + 12)[0]
+        s_ofs_verts = struct.unpack_from("<i", data, surf_start + 16)[0]
+        s_num_tris = struct.unpack_from("<i", data, surf_start + 20)[0]
+        s_ofs_tris = struct.unpack_from("<i", data, surf_start + 24)[0]
+        s_ofs_end = struct.unpack_from("<i", data, surf_start + 36)[0]
+
+        # Skip empty surfaces, tags (*prefix), stubs (3 verts), and placeholders
+        s_name = surf_names[si] if si < len(surf_names) else f"surface_{si}"
+        if s_num_verts <= 3 or s_num_tris <= 0:
+            continue
+        if s_name.startswith('*'):
+            continue
+        if 'stupidtriangle' in s_name.lower():
+            continue
+
+        # Vertices: normal(3f) + position(3f) + packed(I) + weights(4B) = 32 bytes each
+        verts = []
+        norms = []
+        v_off = surf_start + s_ofs_verts
+        if v_off + s_num_verts * 32 > len(data):
+            continue  # vertex data out of bounds
+        for vi in range(s_num_verts):
+            nx, ny, nz = struct.unpack_from("<3f", data, v_off); v_off += 12
+            px, py, pz = struct.unpack_from("<3f", data, v_off); v_off += 12
+            v_off += 8  # skip packed bone data + weight bytes
+            verts.append((px, py, pz))
+            norms.append((nx, ny, nz))
+
+        # UVs follow all vertices: 2f per vert
+        uvs = []
+        if v_off + s_num_verts * 8 <= len(data):
+            for vi in range(s_num_verts):
+                u, v = struct.unpack_from("<2f", data, v_off); v_off += 8
+                uvs.append((u, v))
+
+        # Triangles: 3 ints each
+        faces = []
+        t_off = surf_start + s_ofs_tris
+        if t_off + s_num_tris * 12 <= len(data):
+            for ti in range(s_num_tris):
+                i0, i1, i2 = struct.unpack_from("<3i", data, t_off); t_off += 12
+                faces.append((i2, i1, i0))  # flip winding CW→CCW
+
+        if not verts or not faces:
+            continue
+
+        # Create Blender mesh
+        mesh = bpy.data.meshes.new(s_name)
+        mesh.from_pydata(verts, [], faces)
+        mesh.validate(clean_customdata=False)
+
+        # UVs
+        if uvs:
+            uv_layer = mesh.uv_layers.new(name="UVMap")
+            for li, loop in enumerate(mesh.loops):
+                vi = loop.vertex_index
+                if vi < len(uvs):
+                    u, v = uvs[vi]
+                    uv_layer.data[li].uv = (u, 1.0 - v)
+
+        # Normals imported via from_pydata vertex data (Blender auto-calculates)
+
+        # Material: prefer skin file texture, then shader, then directory texture match
+        shader = ''
+        if s_name in skin_textures:
+            shader = skin_textures[s_name]
+        elif si < len(surf_shaders) and surf_shaders[si] and surf_shaders[si] != '[nomaterial]':
+            shader = surf_shaders[si]
+
+        # Resolve texture path
+        tex_path = None
+        tex_display_name = s_name
+
+        if shader:
+            tex_display_name = os.path.splitext(os.path.basename(shader))[0]
+            # Check if the shader path itself exists relative to GLM dir
+            shader_basename = os.path.basename(shader)
+            shader_no_ext = os.path.splitext(shader_basename)[0].lower()
+            if shader_no_ext in dir_textures:
+                tex_path = dir_textures[shader_no_ext]
+            else:
+                # Try full shader path relative to GLM dir
+                for ext in ('.jpg', '.tga', '.png', '.dds', ''):
+                    check = os.path.join(glm_dir, shader_basename if not ext else os.path.splitext(shader_basename)[0] + ext)
+                    if os.path.exists(check):
+                        tex_path = check
+                        break
+
+        # If no texture found from shader/skin, try matching surface name to files in directory
+        if not tex_path:
+            s_lower = s_name.lower()
+            if s_lower in dir_textures:
+                tex_path = dir_textures[s_lower]
+                tex_display_name = os.path.splitext(os.path.basename(tex_path))[0]
+
+        # Create material
+        mat = bpy.data.materials.get(tex_display_name)
+        if not mat:
+            mat = bpy.data.materials.new(tex_display_name)
+            mat.use_nodes = True
+            nodes = mat.node_tree.nodes
+            bsdf = nodes.get('Principled BSDF')
+            if not bsdf:
+                bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+
+            if tex_path or shader:
+                tex_node = nodes.new('ShaderNodeTexImage')
+                tex_node.location = (-300, 300)
+                img = None
+                if tex_path:
+                    try:
+                        img = bpy.data.images.load(tex_path)
+                    except Exception:
+                        pass
+                if not img:
+                    # Try finding in Blender's loaded images
+                    for ext in ('.jpg', '.tga', '.png', '.dds', ''):
+                        check_name = tex_display_name + ext if ext else tex_display_name
+                        img = bpy.data.images.get(check_name)
+                        if img:
+                            break
+                if not img:
+                    fname = tex_display_name + '.jpg'
+                    img = bpy.data.images.new(fname, width=1, height=1)
+                    img.filepath = fname
+                    img.source = 'FILE'
+                tex_node.image = img
+                mat.node_tree.links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
+            mat.use_backface_culling = False
+        mesh.materials.append(mat)
+
+        mesh.update()
+
+        obj = bpy.data.objects.new(s_name, mesh)
+        bpy.context.collection.objects.link(obj)
+        created_objects.append(obj)
+      except Exception:
+        continue
+
+    if not created_objects:
+        raise ValueError("No mesh surfaces found in GLM file")
+
+    return created_objects
+
+
 class RFCHAR_OT_ImportCustomMesh(bpy.types.Operator, ImportHelper):
     bl_idname = "rfchar.import_custom_mesh"
     bl_label = "Import Custom Mesh"
     bl_description = "Import a mesh file into the scene for binding to the RF armature"
     bl_options = {'REGISTER', 'UNDO'}
 
-    filename_ext = ""
-    filter_glob: StringProperty(default="*.obj;*.fbx;*.gltf;*.glb;*.stl;*.ply;*.dae", options={'HIDDEN'})
+    filename_ext = ".obj"
+    filepath: StringProperty(subtype='FILE_PATH')
+    filter_glob: StringProperty(
+        default="*.obj;*.fbx;*.gltf;*.glb;*.stl;*.ply;*.dae;*.glm",
+        options={'HIDDEN'}
+    )
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
 
     def execute(self, context):
         filepath = self.filepath
+        if not filepath or not os.path.isfile(filepath):
+            self.report({'ERROR'}, "No file selected")
+            return {'CANCELLED'}
         ext = os.path.splitext(filepath)[1].lower()
 
         try:
@@ -2538,11 +4048,23 @@ class RFCHAR_OT_ImportCustomMesh(bpy.types.Operator, ImportHelper):
             elif ext in ('.gltf', '.glb'):
                 bpy.ops.import_scene.gltf(filepath=filepath)
             elif ext == '.stl':
-                bpy.ops.wm.stl_import(filepath=filepath) if hasattr(bpy.ops.wm, 'stl_import') else bpy.ops.import_mesh.stl(filepath=filepath)
+                if hasattr(bpy.ops.wm, 'stl_import'):
+                    bpy.ops.wm.stl_import(filepath=filepath)
+                else:
+                    bpy.ops.import_mesh.stl(filepath=filepath)
             elif ext == '.ply':
-                bpy.ops.wm.ply_import(filepath=filepath) if hasattr(bpy.ops.wm, 'ply_import') else bpy.ops.import_mesh.ply(filepath=filepath)
+                if hasattr(bpy.ops.wm, 'ply_import'):
+                    bpy.ops.wm.ply_import(filepath=filepath)
+                else:
+                    bpy.ops.import_mesh.ply(filepath=filepath)
             elif ext == '.dae':
-                bpy.ops.wm.collada_import(filepath=filepath)
+                # Try Blender's built-in first (Blender < 5.0), fall back to our parser
+                try:
+                    bpy.ops.wm.collada_import(filepath=filepath)
+                except (AttributeError, RuntimeError):
+                    _import_dae(filepath)
+            elif ext == '.glm':
+                _import_glm(filepath)
             else:
                 self.report({'ERROR'}, f"Unsupported format: {ext}")
                 return {'CANCELLED'}
@@ -2556,8 +4078,13 @@ class RFCHAR_OT_ImportCustomMesh(bpy.types.Operator, ImportHelper):
 
 class RFCHAR_OT_BindToArmature(bpy.types.Operator):
     bl_idname = "rfchar.bind_to_armature"
-    bl_label = "Bind Selected to Armature"
-    bl_description = "Parent your mesh to the RF armature with automatic weights. Select your custom mesh first"
+    bl_label = "Bind with Auto Weights"
+    bl_description = (
+        "Parent your custom mesh to the RF armature using Blender's automatic bone heat weights. "
+        "Quick but approximate — best for meshes that don't closely match the original character shape, "
+        "or when the original RF mesh isn't available. May need weight painting cleanup afterward. "
+        "Select your custom mesh first."
+    )
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -2612,8 +4139,13 @@ class RFCHAR_OT_BindToArmature(bpy.types.Operator):
 
 class RFCHAR_OT_TransferWeights(bpy.types.Operator):
     bl_idname = "rfchar.transfer_weights"
-    bl_label = "Transfer Weights from RF"
-    bl_description = "Copy the exact vertex weights from the original RF mesh onto your custom mesh using nearest-surface interpolation — best when your mesh overlaps the RF character"
+    bl_label = "Copy Weights from RF Mesh"
+    bl_description = (
+        "Copy vertex weights from the original RF character mesh onto your custom mesh using "
+        "nearest-surface interpolation. More accurate than auto-weights and preserves RF's exact "
+        "bone weighting — best when your mesh overlaps the original character's shape. "
+        "Requires the original RF mesh to be in the scene (don't delete it after import)."
+    )
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -3012,7 +4544,10 @@ class RFCHAR_OT_CheckWeights(bpy.types.Operator):
             return {'FINISHED'}
 
         # Select the problem vertices
-        bpy.ops.object.mode_set(mode='OBJECT')
+        try:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        except Exception:
+            pass
         bpy.context.view_layer.objects.active = mesh_obj
         mesh_obj.select_set(True)
 
@@ -3031,8 +4566,11 @@ class RFCHAR_OT_CheckWeights(bpy.types.Operator):
             mesh.vertices[vi].select = True
 
         mesh.update()
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.context.tool_settings.mesh_select_mode = (True, False, False)
+        try:
+            bpy.ops.object.mode_set(mode='EDIT')
+            bpy.context.tool_settings.mesh_select_mode = (True, False, False)
+        except Exception:
+            pass
 
         parts = []
         if unweighted:
@@ -3066,17 +4604,250 @@ class RFCHAR_OT_FindTextures(bpy.types.Operator):
 #  REQUIRED ANIMATIONS LOADER
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _auto_load_anims_from_folder(arm_obj, required, folder):
+    """Import required animations from a folder into the armature. Returns count imported."""
+    rf_bones_json = arm_obj.get('rf_bones')
+    if not rf_bones_json:
+        return 0
+    bones_data = json.loads(rf_bones_json)
+    for b in bones_data:
+        b['inv_bind_quat'] = tuple(b['inv_bind_quat'])
+        b['inv_bind_pos'] = tuple(b['inv_bind_pos'])
+
+    # Already-loaded action names
+    rf_actions = _get_rf_actions(arm_obj)
+    loaded_names = set()
+    for aname in rf_actions.keys():
+        loaded_names.add(aname.lower())
+        loaded_names.add(aname.lower() + '.rfa')
+        if aname.lower().endswith('.rfa'):
+            loaded_names.add(aname.lower()[:-4])
+
+    # Build lowercase filename map of the folder
+    folder_files = {}
+    try:
+        for fn in os.listdir(folder):
+            if fn.lower().endswith(('.rfa', '.mvf')):
+                folder_files[fn.lower()] = fn
+                folder_files[os.path.splitext(fn)[0].lower()] = fn
+    except Exception:
+        return 0
+
+    # Find matching files and import
+    imported = 0
+    for rfa in required:
+        name_lc = rfa.lower()
+        name_no_ext = os.path.splitext(rfa)[0].lower()
+        if name_lc in loaded_names or name_no_ext in loaded_names:
+            continue
+        actual = folder_files.get(name_lc) or folder_files.get(name_no_ext)
+        if not actual:
+            actual = folder_files.get(name_no_ext + '.mvf')
+        if not actual:
+            continue
+        fp = os.path.join(folder, actual)
+        anim_name = os.path.splitext(os.path.basename(fp))[0]
+        try:
+            rfa_data = parse_rfa(fp)
+            _import_rfa(rfa_data, arm_obj, bones_data, anim_name)
+            action = arm_obj.animation_data.action
+            if action:
+                track = arm_obj.animation_data.nla_tracks.new()
+                track.name = action.name
+                start = int(action.frame_range[0])
+                track.strips.new(action.name, start, action)
+                track.mute = True
+                arm_obj.animation_data.action = None
+            imported += 1
+        except Exception as e:
+            print(f"[RF Character] Failed to auto-load '{anim_name}': {e}")
+
+    # Force rest pose after all imports: clear action, reset pose bones, mute all tracks
+    if imported > 0 and arm_obj.animation_data:
+        try:
+            arm_obj.animation_data.action = None
+            for track in arm_obj.animation_data.nla_tracks:
+                track.mute = True
+            for pb in arm_obj.pose.bones:
+                pb.rotation_quaternion = (1, 0, 0, 0)
+                pb.location = (0, 0, 0)
+                pb.scale = (1, 1, 1)
+            try:
+                bpy.context.scene.frame_set(bpy.context.scene.frame_current)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[RF Character] Could not set rest pose: {e}")
+
+    return imported
+
+
+def _get_master_config_path():
+    """Path to the master folder config file (persists across sessions)."""
+    try:
+        config_dir = bpy.utils.user_resource('CONFIG')
+        return os.path.join(config_dir, 'rf_character_master.txt')
+    except Exception:
+        return None
+
+
+def _save_master_folder(path):
+    """Save master folder path to config file."""
+    cfg = _get_master_config_path()
+    if not cfg:
+        return False
+    try:
+        os.makedirs(os.path.dirname(cfg), exist_ok=True)
+        with open(cfg, 'w', encoding='utf-8') as f:
+            f.write(path or '')
+        return True
+    except Exception as e:
+        print(f"[RF Character] Could not save master folder: {e}")
+        return False
+
+
+def _load_master_folder():
+    """Load master folder path from config file."""
+    cfg = _get_master_config_path()
+    if not cfg or not os.path.isfile(cfg):
+        return ''
+    try:
+        with open(cfg, 'r', encoding='utf-8') as f:
+            return f.read().strip()
+    except Exception:
+        return ''
+
+
+def _get_master_folder(context=None):
+    """Get master folder path from saved config."""
+    saved = _load_master_folder()
+    if saved:
+        try:
+            return bpy.path.abspath(saved)
+        except Exception:
+            return saved
+    return ''
+
+
+def _get_auto_load_enabled(context=None):
+    """Get auto-load setting - always on unless explicitly disabled."""
+    if context is None:
+        context = bpy.context
+    try:
+        return getattr(context.scene, 'rfchar_auto_load_anims', True)
+    except Exception:
+        return True
+
+
+class RFCHAR_OT_SetMasterFolder(bpy.types.Operator):
+    bl_idname = "rfchar.set_master_folder"
+    bl_label = "Set Master Animation Folder"
+    bl_description = "Choose the folder containing all your RF .rfa animation files. Required animations will be auto-loaded from here whenever a V3C is imported"
+    bl_options = {'REGISTER'}
+
+    directory: StringProperty(subtype='DIR_PATH')
+
+    def invoke(self, context, event):
+        # Pre-fill with current saved folder
+        current = _get_master_folder(context)
+        if current and os.path.isdir(current):
+            self.directory = current
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        folder = bpy.path.abspath(self.directory) if self.directory else ''
+        if not folder or not os.path.isdir(folder):
+            self.report({'ERROR'}, "Not a valid folder")
+            return {'CANCELLED'}
+        if _save_master_folder(folder):
+            try:
+                count = sum(1 for f in os.listdir(folder)
+                           if f.lower().endswith(('.rfa', '.mvf')))
+                self.report({'INFO'}, f"Master folder set: {count} animation files found")
+            except Exception:
+                self.report({'INFO'}, f"Master folder set: {folder}")
+        else:
+            self.report({'WARNING'}, "Folder set but could not save to config")
+        return {'FINISHED'}
+
+
+class RFCHAR_OT_ClearMasterFolder(bpy.types.Operator):
+    bl_idname = "rfchar.clear_master_folder"
+    bl_label = "Clear Master Folder"
+    bl_description = "Remove the saved master animation folder"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        _save_master_folder('')
+        self.report({'INFO'}, "Master folder cleared")
+        return {'FINISHED'}
+
+
+class RFCHAR_OT_AutoLoadFromMaster(bpy.types.Operator):
+    bl_idname = "rfchar.autoload_from_master"
+    bl_label = "Auto-Load from Master Folder"
+    bl_description = "Load required animations from the master folder set in Preferences"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        arm_obj = _find_rf_armature(context)
+        if not arm_obj:
+            self.report({'ERROR'}, "No RF armature found")
+            return {'CANCELLED'}
+
+        master_abs = _get_master_folder(context)
+        if not master_abs:
+            self.report({'ERROR'}, "No master folder set. Open Edit > Preferences > Add-ons > RF Character Import")
+            return {'CANCELLED'}
+        if not os.path.isdir(master_abs):
+            self.report({'ERROR'}, f"Master folder doesn't exist: {master_abs}")
+            return {'CANCELLED'}
+
+        req_json = arm_obj.get('rf_required_anims', '[]')
+        required = json.loads(req_json) if isinstance(req_json, str) else []
+        if not required:
+            self.report({'INFO'}, "No required animations for this character")
+            return {'CANCELLED'}
+
+        loaded = _auto_load_anims_from_folder(arm_obj, required, master_abs)
+        if loaded > 0:
+            arm_obj['rf_anim_folder'] = master_abs
+            context.scene['rf_last_anim_folder'] = master_abs
+            self.report({'INFO'}, f"Loaded {loaded} animation{'s' if loaded != 1 else ''} from master folder")
+        else:
+            self.report({'INFO'}, "All required animations already loaded (or none found in folder)")
+        return {'FINISHED'}
+
+
 class RFCHAR_OT_LoadRequiredAnims(bpy.types.Operator):
     bl_idname = "rfchar.load_required_anims"
     bl_label = "Load Required Animations"
-    bl_description = "Browse to your RF data folder and import all missing required animations"
+    bl_description = "Import all missing required animations from your RF data folder"
     bl_options = {'REGISTER', 'UNDO'}
 
     directory: StringProperty(subtype='DIR_PATH')
     load_all: BoolProperty(name="Load All", default=True,
         description="Load all missing animations. If False, only loads checked ones")
+    force_browse: BoolProperty(default=False, options={'HIDDEN'})
 
     def invoke(self, context, event):
+        # Try to auto-use the remembered folder if one exists
+        if not self.force_browse:
+            arm_obj = _find_rf_armature(context)
+            remembered = None
+            if arm_obj:
+                remembered = arm_obj.get('rf_anim_folder')
+            if not remembered:
+                remembered = context.scene.get('rf_last_anim_folder')
+            if not remembered:
+                # Fall back to master folder
+                master = _get_master_folder(context)
+                if master:
+                    remembered = master
+            if remembered and os.path.isdir(remembered):
+                self.directory = remembered
+                return self.execute(context)
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
@@ -3187,6 +4958,20 @@ class RFCHAR_OT_LoadRequiredAnims(bpy.types.Operator):
                            if r.lower() not in loaded_names
                            and os.path.splitext(r)[0].lower() not in loaded_names)
 
+        # Force rest pose after loading
+        if imported > 0 and arm_obj.animation_data:
+            try:
+                arm_obj.animation_data.action = None
+                for track in arm_obj.animation_data.nla_tracks:
+                    track.mute = True
+                for pb in arm_obj.pose.bones:
+                    pb.rotation_quaternion = (1, 0, 0, 0)
+                    pb.location = (0, 0, 0)
+                    pb.scale = (1, 1, 1)
+                context.scene.frame_set(context.scene.frame_current)
+            except Exception:
+                pass
+
         msg = f"Imported {imported} animation{'s' if imported != 1 else ''}"
         if failed:
             msg += f", {failed} failed"
@@ -3195,6 +4980,12 @@ class RFCHAR_OT_LoadRequiredAnims(bpy.types.Operator):
         else:
             msg += " — all required animations loaded"
         self.report({'INFO'}, msg)
+
+        # Remember this folder for future loads
+        if imported > 0:
+            arm_obj['rf_anim_folder'] = folder
+            context.scene['rf_last_anim_folder'] = folder
+
         return {'FINISHED'}
 
 
@@ -3458,6 +5249,772 @@ class RFCHAR_PT_WorkflowPanel(bpy.types.Panel):
         col.label(text="5. Export RFA to use in-game")
 
 
+class RFCHAR_OT_ImportRecent(bpy.types.Operator):
+    bl_idname = "rfchar.import_recent"
+    bl_label = "Import Recent V3C"
+    bl_description = "Re-import a recently used V3C file"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    filepath: StringProperty()
+
+    def execute(self, context):
+        if not self.filepath or not os.path.isfile(self.filepath):
+            self.report({'ERROR'}, "File no longer exists")
+            # Remove from recent list
+            recent = list(context.scene.get('rf_recent_v3c', []))
+            if self.filepath in recent:
+                recent.remove(self.filepath)
+                context.scene['rf_recent_v3c'] = recent
+            return {'CANCELLED'}
+        bpy.ops.import_scene.rf_v3c(filepath=self.filepath)
+        return {'FINISHED'}
+
+
+class RFCHAR_OT_ClearRecent(bpy.types.Operator):
+    bl_idname = "rfchar.clear_recent"
+    bl_label = "Clear Recent Files"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        context.scene['rf_recent_v3c'] = []
+        return {'FINISHED'}
+
+
+class RFCHAR_OT_ValidateExport(bpy.types.Operator):
+    bl_idname = "rfchar.validate_export"
+    bl_label = "Validate for Export"
+    bl_description = "Check the current character for export problems before you export"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        arm_obj = _find_rf_armature(context)
+        if not arm_obj:
+            self.report({'ERROR'}, "No RF armature")
+            return {'CANCELLED'}
+
+        issues = []
+        warnings = []
+        info = []
+
+        # Bone data
+        rf_bones_json = arm_obj.get('rf_bones')
+        if not rf_bones_json:
+            issues.append("No RF bone data on armature (import a V3C first)")
+        else:
+            bones_data = json.loads(rf_bones_json)
+            info.append(f"{len(bones_data)} RF bones available")
+            # Check armature matches
+            arm_bone_names = {b.name for b in arm_obj.data.bones}
+            rf_bone_names = {b['name'] for b in bones_data}
+            missing_in_arm = rf_bone_names - arm_bone_names
+            extra_in_arm = arm_bone_names - rf_bone_names
+            if missing_in_arm:
+                warnings.append(f"{len(missing_in_arm)} RF bones missing from armature: {', '.join(list(missing_in_arm)[:3])}{'...' if len(missing_in_arm) > 3 else ''}")
+            if extra_in_arm:
+                warnings.append(f"{len(extra_in_arm)} extra bones on armature (will be ignored): {', '.join(list(extra_in_arm)[:3])}{'...' if len(extra_in_arm) > 3 else ''}")
+
+        # Find mesh
+        mesh_obj = None
+        if context.active_object and context.active_object.type == 'MESH':
+            mesh_obj = context.active_object
+        else:
+            for c in arm_obj.children:
+                if c.type == 'MESH' and not c.hide_viewport:
+                    mesh_obj = c; break
+
+        if not mesh_obj:
+            issues.append("No mesh to export")
+        else:
+            mesh = mesh_obj.data
+            vcount = len(mesh.vertices)
+            fcount = len(mesh.polygons)
+            info.append(f"Mesh '{mesh_obj.name}': {vcount} verts, {fcount} faces")
+
+            # Check triangulation
+            non_tri = sum(1 for p in mesh.polygons if len(p.vertices) != 3)
+            if non_tri:
+                warnings.append(f"{non_tri} non-triangle faces (will be triangulated on export)")
+
+            # Check weights
+            if rf_bones_json:
+                rf_bone_names = {b['name'] for b in bones_data}
+                over_weighted = 0
+                unweighted = 0
+                wrong_bone = 0
+                for v in mesh.vertices:
+                    valid = [g for g in v.groups if mesh_obj.vertex_groups[g.group].name in rf_bone_names and g.weight > 0.001]
+                    if len(valid) > 4:
+                        over_weighted += 1
+                    if not valid:
+                        unweighted += 1
+                    invalid = [g for g in v.groups if mesh_obj.vertex_groups[g.group].name not in rf_bone_names and g.weight > 0.001]
+                    if invalid:
+                        wrong_bone += 1
+                if unweighted:
+                    issues.append(f"{unweighted} vertices with no weights (will fail to bind)")
+                if over_weighted:
+                    warnings.append(f"{over_weighted} vertices with >4 bone influences (excess will be dropped)")
+                if wrong_bone:
+                    warnings.append(f"{wrong_bone} vertices weighted to non-RF bones (will be dropped)")
+
+            # Check materials
+            if not mesh.materials:
+                warnings.append("Mesh has no materials")
+            else:
+                no_tex = 0
+                wrong_ext = []
+                name_mismatch = []
+                for m in mesh.materials:
+                    if not m: no_tex += 1; continue
+                    img = None
+                    if m.use_nodes and m.node_tree:
+                        bsdf = m.node_tree.nodes.get('Principled BSDF')
+                        if bsdf and 'Base Color' in bsdf.inputs:
+                            for link in bsdf.inputs['Base Color'].links:
+                                if link.from_node.type == 'TEX_IMAGE' and link.from_node.image:
+                                    img = link.from_node.image
+                                    break
+                        if not img:
+                            for n in m.node_tree.nodes:
+                                if n.type == 'TEX_IMAGE' and n.image:
+                                    img = n.image; break
+                    if not img:
+                        no_tex += 1
+                        continue
+                    # Check extension
+                    if not img.name.lower().endswith('.tga'):
+                        wrong_ext.append(img.name)
+                    # Check material name matches image base
+                    img_base = os.path.splitext(img.name)[0]
+                    if m.name != img_base:
+                        name_mismatch.append(f"{m.name}→{img_base}")
+                if no_tex:
+                    warnings.append(f"{no_tex}/{len(mesh.materials)} materials have no texture")
+                if wrong_ext:
+                    preview = ', '.join(wrong_ext[:3]) + ('...' if len(wrong_ext) > 3 else '')
+                    warnings.append(f"{len(wrong_ext)} image(s) not .tga: {preview} (use Sync Texture Names)")
+                if name_mismatch:
+                    preview = ', '.join(name_mismatch[:3]) + ('...' if len(name_mismatch) > 3 else '')
+                    info.append(f"{len(name_mismatch)} material/image name mismatch: {preview}")
+
+            # Chunk size warning
+            if vcount > 5400 and vcount <= 5461:
+                warnings.append(f"Vertex count {vcount} is near the 5,461 per-chunk limit")
+            if vcount > 5461:
+                info.append(f"Will be split into {(vcount // 5400) + 1} chunks on export")
+
+        # Report
+        lines = []
+        if issues:
+            lines.append(f"{len(issues)} ERROR(S):")
+            lines.extend([f"  ✗ {i}" for i in issues])
+        if warnings:
+            lines.append(f"{len(warnings)} WARNING(S):")
+            lines.extend([f"  ⚠ {w}" for w in warnings])
+        if info:
+            lines.extend([f"  · {i}" for i in info])
+
+        if not issues and not warnings:
+            self.report({'INFO'}, "Export validation passed — ready to export")
+        else:
+            for line in lines:
+                self.report({'WARNING'} if warnings and not issues else ({'ERROR'} if issues else {'INFO'}), line)
+            self.report({'INFO'}, f"Validation: {len(issues)} errors, {len(warnings)} warnings. See System Console for details.")
+            # Also print to console
+            print("\n=== RF Character Export Validation ===")
+            for line in lines:
+                print(line)
+            print("======================================")
+
+        return {'FINISHED'} if not issues else {'CANCELLED'}
+
+
+class RFCHAR_OT_RenameActionsToDB(bpy.types.Operator):
+    bl_idname = "rfchar.rename_actions_to_db"
+    bl_label = "Rename Actions to DB"
+    bl_description = "Match loaded animation names (case-insensitive) to the required animations database and rename them to canonical form"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        arm_obj = _find_rf_armature(context)
+        if not arm_obj:
+            self.report({'ERROR'}, "No RF armature")
+            return {'CANCELLED'}
+
+        req_json = arm_obj.get('rf_required_anims', '[]')
+        required = json.loads(req_json) if isinstance(req_json, str) else []
+        if not required:
+            self.report({'INFO'}, "No required animations list to match against")
+            return {'CANCELLED'}
+
+        # Build canonical name map (lowercase no-ext → canonical name w/o ext)
+        canonical = {}
+        for rfa in required:
+            no_ext = os.path.splitext(rfa)[0]
+            canonical[no_ext.lower()] = no_ext
+
+        rf_actions = _get_rf_actions(arm_obj)
+        renamed = 0
+        for aname, action in list(rf_actions.items()):
+            lc = aname.lower()
+            # Strip .rfa extension if present
+            if lc.endswith('.rfa'):
+                lc = lc[:-4]
+            if lc in canonical and action.name != canonical[lc]:
+                action.name = canonical[lc]
+                renamed += 1
+
+        self.report({'INFO'}, f"Renamed {renamed} action{'s' if renamed != 1 else ''}")
+        return {'FINISHED'}
+
+
+class RFCHAR_OT_BatchExportV3C(bpy.types.Operator):
+    bl_idname = "rfchar.batch_export_v3c"
+    bl_label = "Batch Export V3Cs"
+    bl_description = "Export each selected armature to its own V3C file in a chosen folder"
+    bl_options = {'REGISTER'}
+
+    directory: StringProperty(subtype='DIR_PATH')
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        # Collect armatures to export (selected + active)
+        armatures = [o for o in context.selected_objects if o.type == 'ARMATURE' and o.get('rf_bones')]
+        if context.active_object and context.active_object.type == 'ARMATURE' and context.active_object not in armatures:
+            if context.active_object.get('rf_bones'):
+                armatures.append(context.active_object)
+
+        if not armatures:
+            self.report({'ERROR'}, "Select one or more RF armatures to export")
+            return {'CANCELLED'}
+
+        folder = bpy.path.abspath(self.directory)
+        if not os.path.isdir(folder):
+            self.report({'ERROR'}, f"Folder not found: {folder}")
+            return {'CANCELLED'}
+
+        original_active = context.view_layer.objects.active
+        exported = 0
+        failed = 0
+        for arm in armatures:
+            source = arm.get('rf_source_file', arm.name + '.v3c')
+            if not source.lower().endswith('.v3c'):
+                source = os.path.splitext(source)[0] + '.v3c'
+            out_path = os.path.join(folder, source)
+            try:
+                context.view_layer.objects.active = arm
+                bpy.ops.export_scene.rf_v3c(filepath=out_path)
+                exported += 1
+            except Exception as e:
+                self.report({'WARNING'}, f"Failed {arm.name}: {e}")
+                failed += 1
+
+        context.view_layer.objects.active = original_active
+        self.report({'INFO'}, f"Exported {exported}/{len(armatures)} V3Cs to {folder}")
+        return {'FINISHED'}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TEXTURE ATLAS — combine multiple material textures into one
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _collect_mesh_images(meshes):
+    """Returns OrderedDict: image → list of (mesh_obj, material_index)"""
+    from collections import OrderedDict
+    result = OrderedDict()
+    for obj in meshes:
+        for slot_idx, slot in enumerate(obj.material_slots):
+            mat = slot.material
+            if not mat or not mat.use_nodes or not mat.node_tree:
+                continue
+            img = None
+            # Prefer the image connected to Base Color, else first image node
+            bsdf = mat.node_tree.nodes.get('Principled BSDF')
+            if bsdf and 'Base Color' in bsdf.inputs:
+                for link in bsdf.inputs['Base Color'].links:
+                    if link.from_node.type == 'TEX_IMAGE' and link.from_node.image:
+                        img = link.from_node.image
+                        break
+            if not img:
+                for node in mat.node_tree.nodes:
+                    if node.type == 'TEX_IMAGE' and node.image:
+                        img = node.image
+                        break
+            if img:
+                result.setdefault(img, []).append((obj, slot_idx))
+    return result
+
+
+class RFCHAR_OT_GenerateAtlas(bpy.types.Operator):
+    bl_idname = "rfchar.generate_atlas"
+    bl_label = "Generate Texture Atlas"
+    bl_description = "Combine the selected mesh's material textures into a single atlas TGA, remap UVs, and replace materials"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    atlas_size: EnumProperty(
+        name="Size",
+        items=[
+            ('128', "128x128", "128x128 atlas"),
+            ('256', "256x256", "256x256 atlas"),
+            ('512', "512x512", "512x512 atlas (recommended)"),
+            ('1024', "1024x1024", "1024x1024 atlas (high quality)"),
+            ('2048', "2048x2048", "2048x2048 atlas (very high quality)"),
+        ],
+        default='512',
+    )
+
+    atlas_name: StringProperty(
+        name="Name",
+        description="Atlas filename without extension",
+        default="atlas",
+    )
+
+    output_dir: StringProperty(
+        name="Output Folder",
+        subtype='DIR_PATH',
+        default="",
+    )
+
+    file_format: EnumProperty(
+        name="Format",
+        items=[
+            ('TGA', "TGA", "Targa (RF standard)"),
+            ('PNG', "PNG", "PNG (lossless)"),
+        ],
+        default='TGA',
+    )
+
+    replace_materials: BoolProperty(
+        name="Replace materials with atlas material",
+        description="Remove individual material slots and assign single atlas material",
+        default=True,
+    )
+
+    remap_uvs: BoolProperty(
+        name="Remap UVs",
+        description="Transform UVs to reference the correct atlas region",
+        default=True,
+    )
+
+    def invoke(self, context, event):
+        # Default name from active object or armature
+        arm_obj = _find_rf_armature(context)
+        if arm_obj and arm_obj.get('rf_source_file'):
+            self.atlas_name = os.path.splitext(arm_obj['rf_source_file'])[0]
+        elif context.active_object:
+            self.atlas_name = context.active_object.name
+
+        # Default folder from scene memory
+        remembered = context.scene.get('rf_texture_folder') or context.scene.get('rf_last_anim_folder')
+        if remembered:
+            self.output_dir = remembered
+
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def draw(self, context):
+        layout = self.layout
+        meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        if not meshes and context.active_object and context.active_object.type == 'MESH':
+            meshes = [context.active_object]
+        images = _collect_mesh_images(meshes)
+
+        if not images:
+            layout.label(text="No textured materials found on selected mesh(es)", icon='ERROR')
+            return
+
+        box = layout.box()
+        box.label(text=f"Found {len(images)} texture(s) on {len(meshes)} mesh(es):", icon='IMAGE_DATA')
+        col = box.column(align=True)
+        for img, uses in list(images.items())[:8]:
+            size_txt = f"{img.size[0]}x{img.size[1]}"
+            col.label(text=f"  · {img.name}  ({size_txt})", icon='IMAGE')
+        if len(images) > 8:
+            col.label(text=f"  ...and {len(images) - 8} more")
+
+        layout.separator()
+        layout.prop(self, "atlas_name")
+        layout.prop(self, "atlas_size")
+        layout.prop(self, "file_format")
+        layout.prop(self, "output_dir")
+        layout.separator()
+        layout.prop(self, "remap_uvs")
+        layout.prop(self, "replace_materials")
+
+    def execute(self, context):
+        # Collect meshes
+        meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        if not meshes and context.active_object and context.active_object.type == 'MESH':
+            meshes = [context.active_object]
+        if not meshes:
+            self.report({'ERROR'}, "Select a mesh (or meshes) to atlas")
+            return {'CANCELLED'}
+
+        images_map = _collect_mesh_images(meshes)
+        if not images_map:
+            self.report({'ERROR'}, "No image textures found on any material")
+            return {'CANCELLED'}
+
+        img_list = list(images_map.keys())
+        n = len(img_list)
+
+        # Grid layout
+        grid_w = math.ceil(math.sqrt(n))
+        grid_h = math.ceil(n / grid_w)
+        atlas_size = int(self.atlas_size)
+        tile_size = atlas_size // max(grid_w, grid_h)
+        if tile_size < 8:
+            self.report({'ERROR'}, f"Atlas size too small for {n} textures. Increase atlas size.")
+            return {'CANCELLED'}
+
+        # Assign each image a tile position
+        # Layout: image i goes at col=i%grid_w, row=i//grid_w, row 0 at TOP
+        tile_positions = {}  # image → (u_offset, v_offset, u_scale, v_scale, px, py_from_bottom)
+        for i, img in enumerate(img_list):
+            col = i % grid_w
+            row = i // grid_w
+            px = col * tile_size
+            py_from_bottom = (grid_h - 1 - row) * tile_size
+            u_off = px / atlas_size
+            v_off = py_from_bottom / atlas_size
+            tile_scale = tile_size / atlas_size
+            tile_positions[img] = (u_off, v_off, tile_scale, tile_scale, px, py_from_bottom)
+
+        # Build atlas using numpy
+        try:
+            import numpy as np
+        except ImportError:
+            self.report({'ERROR'}, "numpy required for atlas generation (should ship with Blender)")
+            return {'CANCELLED'}
+
+        atlas_arr = np.zeros((atlas_size, atlas_size, 4), dtype=np.float32)
+        atlas_arr[:, :, 3] = 1.0  # opaque default
+
+        skipped = []
+        success = 0
+        temp_copies = []
+        try:
+            for img in img_list:
+                u_off, v_off, u_sc, v_sc, px, py = tile_positions[img]
+
+                # Ensure source image is loaded
+                try:
+                    if img.source == 'FILE' and not img.has_data:
+                        img.reload()
+                except Exception:
+                    pass
+
+                # Get source size and validate
+                src_w, src_h = img.size[0], img.size[1]
+                if src_w == 0 or src_h == 0:
+                    skipped.append(f"{img.name} (size 0x0 - not loaded)")
+                    continue
+
+                channels = img.channels if hasattr(img, 'channels') else 4
+
+                # Read pixels from original (don't trust copy.pixels)
+                try:
+                    src_pixels = np.empty(src_w * src_h * channels, dtype=np.float32)
+                    img.pixels.foreach_get(src_pixels)
+                except Exception as e:
+                    skipped.append(f"{img.name} (pixel read failed: {e})")
+                    continue
+
+                # Validate we got actual data
+                if src_pixels.size == 0:
+                    skipped.append(f"{img.name} (empty pixel data)")
+                    continue
+
+                # Reshape to (h, w, channels)
+                try:
+                    src_arr = src_pixels.reshape(src_h, src_w, channels)
+                except Exception as e:
+                    skipped.append(f"{img.name} (reshape failed: {e})")
+                    continue
+
+                # Convert to RGBA
+                if channels == 3:
+                    rgba = np.ones((src_h, src_w, 4), dtype=np.float32)
+                    rgba[:, :, :3] = src_arr
+                    src_arr = rgba
+                elif channels == 1:
+                    rgba = np.ones((src_h, src_w, 4), dtype=np.float32)
+                    rgba[:, :, 0] = src_arr[:, :, 0]
+                    rgba[:, :, 1] = src_arr[:, :, 0]
+                    rgba[:, :, 2] = src_arr[:, :, 0]
+                    src_arr = rgba
+                elif channels != 4:
+                    skipped.append(f"{img.name} (unsupported channels: {channels})")
+                    continue
+
+                # Fix broken alpha (all zeros means opaque)
+                if np.all(src_arr[:, :, 3] == 0):
+                    src_arr = src_arr.copy()
+                    src_arr[:, :, 3] = 1.0
+
+                # Resize to tile_size × tile_size using nearest-neighbor via numpy
+                # (Pillow would be better but may not be available)
+                if src_w != tile_size or src_h != tile_size:
+                    # Use linear interpolation via Blender's scale() on a copy
+                    try:
+                        img_copy = img.copy()
+                        temp_copies.append(img_copy)
+                        img_copy.scale(tile_size, tile_size)
+                        scaled_pixels = np.empty(tile_size * tile_size * img_copy.channels, dtype=np.float32)
+                        img_copy.pixels.foreach_get(scaled_pixels)
+                        scaled_arr = scaled_pixels.reshape(tile_size, tile_size, img_copy.channels)
+                        # Convert to RGBA if needed
+                        if img_copy.channels == 3:
+                            rgba = np.ones((tile_size, tile_size, 4), dtype=np.float32)
+                            rgba[:, :, :3] = scaled_arr
+                            scaled_arr = rgba
+                        elif img_copy.channels == 1:
+                            rgba = np.ones((tile_size, tile_size, 4), dtype=np.float32)
+                            rgba[:, :, 0] = scaled_arr[:, :, 0]
+                            rgba[:, :, 1] = scaled_arr[:, :, 0]
+                            rgba[:, :, 2] = scaled_arr[:, :, 0]
+                            scaled_arr = rgba
+                        if np.all(scaled_arr[:, :, 3] == 0):
+                            scaled_arr = scaled_arr.copy()
+                            scaled_arr[:, :, 3] = 1.0
+                        src_arr = scaled_arr
+                    except Exception as e:
+                        # Fallback: nearest-neighbor via numpy
+                        y_idx = (np.arange(tile_size) * src_h // tile_size).astype(np.int32)
+                        x_idx = (np.arange(tile_size) * src_w // tile_size).astype(np.int32)
+                        src_arr = src_arr[y_idx[:, None], x_idx[None, :]]
+
+                # Write to atlas
+                try:
+                    atlas_arr[py:py+tile_size, px:px+tile_size] = src_arr
+                    success += 1
+                except Exception as e:
+                    skipped.append(f"{img.name} (atlas write failed: {e})")
+                    continue
+        finally:
+            for tc in temp_copies:
+                try:
+                    bpy.data.images.remove(tc)
+                except Exception:
+                    pass
+
+        if success == 0:
+            self.report({'ERROR'}, f"No textures could be read. Skipped: {'; '.join(skipped[:3])}")
+            return {'CANCELLED'}
+
+        if skipped:
+            self.report({'WARNING'}, f"Skipped {len(skipped)}: {'; '.join(skipped[:2])}")
+
+        # Create Blender atlas image
+        atlas_img_name = self.atlas_name + (".tga" if self.file_format == 'TGA' else ".png")
+        # Remove existing image with same name if any
+        existing = bpy.data.images.get(atlas_img_name)
+        if existing:
+            bpy.data.images.remove(existing)
+        atlas_img = bpy.data.images.new(atlas_img_name, atlas_size, atlas_size, alpha=True)
+
+        # Write pixels — foreach_set is much faster and more reliable than = list
+        flat = atlas_arr.flatten()
+        try:
+            atlas_img.pixels.foreach_set(flat)
+        except Exception:
+            atlas_img.pixels = flat.tolist()
+        atlas_img.update()
+
+        # Save to disk
+        if not self.output_dir:
+            self.report({'ERROR'}, "Pick an output folder")
+            return {'CANCELLED'}
+        out_folder = bpy.path.abspath(self.output_dir)
+        if not os.path.isdir(out_folder):
+            try:
+                os.makedirs(out_folder, exist_ok=True)
+            except Exception as e:
+                self.report({'ERROR'}, f"Can't create folder: {e}")
+                return {'CANCELLED'}
+
+        out_path = os.path.join(out_folder, atlas_img_name)
+        atlas_img.filepath_raw = out_path
+        atlas_img.file_format = 'TARGA' if self.file_format == 'TGA' else 'PNG'
+        try:
+            atlas_img.save()
+        except Exception as e:
+            self.report({'ERROR'}, f"Save failed: {e}")
+            return {'CANCELLED'}
+
+        # Remember folder
+        context.scene['rf_texture_folder'] = out_folder
+
+        # Remap UVs
+        if self.remap_uvs:
+            for obj in meshes:
+                mesh = obj.data
+                uv_layer = mesh.uv_layers.active
+                if not uv_layer:
+                    continue
+                for poly in mesh.polygons:
+                    mat_idx = poly.material_index
+                    if mat_idx >= len(obj.material_slots):
+                        continue
+                    mat = obj.material_slots[mat_idx].material
+                    if not mat:
+                        continue
+                    # Find image for this material
+                    img = None
+                    if mat.use_nodes and mat.node_tree:
+                        bsdf = mat.node_tree.nodes.get('Principled BSDF')
+                        if bsdf and 'Base Color' in bsdf.inputs:
+                            for link in bsdf.inputs['Base Color'].links:
+                                if link.from_node.type == 'TEX_IMAGE' and link.from_node.image:
+                                    img = link.from_node.image
+                                    break
+                        if not img:
+                            for node in mat.node_tree.nodes:
+                                if node.type == 'TEX_IMAGE' and node.image:
+                                    img = node.image
+                                    break
+                    if img not in tile_positions:
+                        continue
+                    u_off, v_off, u_sc, v_sc, _, _ = tile_positions[img]
+                    for loop_idx in poly.loop_indices:
+                        old_u, old_v = uv_layer.data[loop_idx].uv
+                        new_u = old_u * u_sc + u_off
+                        new_v = old_v * v_sc + v_off
+                        uv_layer.data[loop_idx].uv = (new_u, new_v)
+
+        # Replace materials with atlas material
+        if self.replace_materials:
+            # Name the material EXACTLY like the atlas filename (without extension)
+            # This ensures the material name matches the texture for V3C export
+            atlas_mat_name = self.atlas_name
+            atlas_mat = bpy.data.materials.get(atlas_mat_name)
+            if atlas_mat:
+                bpy.data.materials.remove(atlas_mat)
+            atlas_mat = bpy.data.materials.new(atlas_mat_name)
+            atlas_mat.use_nodes = True
+            nodes = atlas_mat.node_tree.nodes
+            bsdf = nodes.get('Principled BSDF')
+            if not bsdf:
+                bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+            tex_node = nodes.new('ShaderNodeTexImage')
+            tex_node.image = atlas_img
+            tex_node.location = (-300, 300)
+            atlas_mat.node_tree.links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
+            atlas_mat.use_backface_culling = False
+
+            for obj in meshes:
+                obj.data.materials.clear()
+                obj.data.materials.append(atlas_mat)
+
+        self.report({'INFO'},
+            f"Atlas '{atlas_img_name}' saved — {n} textures → {atlas_size}x{atlas_size} (tile {tile_size}x{tile_size})")
+        return {'FINISHED'}
+
+
+class RFCHAR_OT_FixTextureNames(bpy.types.Operator):
+    bl_idname = "rfchar.fix_texture_names"
+    bl_label = "Sync Texture Names"
+    bl_description = "Ensure each material's image texture filename ends in .tga and matches what the V3C exporter will write. Renames material to match image filename."
+    bl_options = {'REGISTER', 'UNDO'}
+
+    force_tga: BoolProperty(
+        name="Force .tga extension",
+        description="Change extensions like .png/.jpg/.dds on image names to .tga (filename only, not the actual file)",
+        default=True,
+    )
+    sync_material_names: BoolProperty(
+        name="Rename material to match texture",
+        description="Rename each material to match its image's base filename (without extension)",
+        default=True,
+    )
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def execute(self, context):
+        # Find all mesh objects to process
+        meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        if not meshes and context.active_object and context.active_object.type == 'MESH':
+            meshes = [context.active_object]
+        # Also include armature's mesh children if an armature is active
+        arm_obj = _find_rf_armature(context)
+        if arm_obj:
+            for c in arm_obj.children:
+                if c.type == 'MESH' and c not in meshes and not c.hide_viewport:
+                    meshes.append(c)
+        if not meshes:
+            self.report({'ERROR'}, "No meshes found — select a mesh or armature")
+            return {'CANCELLED'}
+
+        fixed_imgs = 0
+        fixed_mats = 0
+        scanned_mats = 0
+        issues = []
+
+        seen_materials = set()
+        for obj in meshes:
+            for slot in obj.material_slots:
+                mat = slot.material
+                if not mat or mat.name in seen_materials:
+                    continue
+                seen_materials.add(mat.name)
+                scanned_mats += 1
+
+                # Find the image in this material
+                img = None
+                if mat.use_nodes and mat.node_tree:
+                    # Prefer Base Color connected image
+                    bsdf = mat.node_tree.nodes.get('Principled BSDF')
+                    if bsdf and 'Base Color' in bsdf.inputs:
+                        for link in bsdf.inputs['Base Color'].links:
+                            if link.from_node.type == 'TEX_IMAGE' and link.from_node.image:
+                                img = link.from_node.image
+                                break
+                    if not img:
+                        for node in mat.node_tree.nodes:
+                            if node.type == 'TEX_IMAGE' and node.image:
+                                img = node.image
+                                break
+
+                if not img:
+                    issues.append(f"'{mat.name}' has no image texture")
+                    continue
+
+                # Force .tga extension on image name
+                old_img_name = img.name
+                if self.force_tga:
+                    base = os.path.splitext(img.name)[0]
+                    new_img_name = base + '.tga'
+                    if img.name != new_img_name:
+                        img.name = new_img_name
+                        fixed_imgs += 1
+
+                # Sync material name to match image (without extension)
+                if self.sync_material_names:
+                    base_name = os.path.splitext(img.name)[0]
+                    if mat.name != base_name:
+                        # Check for conflicts
+                        existing = bpy.data.materials.get(base_name)
+                        if existing and existing != mat:
+                            issues.append(f"Can't rename '{mat.name}' → '{base_name}' (name taken)")
+                        else:
+                            mat.name = base_name
+                            fixed_mats += 1
+
+        lines = [f"Scanned {scanned_mats} materials"]
+        if fixed_imgs:
+            lines.append(f"Renamed {fixed_imgs} image(s) to .tga extension")
+        if fixed_mats:
+            lines.append(f"Renamed {fixed_mats} material(s) to match texture")
+        for i in issues:
+            lines.append(f"⚠ {i}")
+
+        self.report({'INFO'}, " · ".join(lines))
+        return {'FINISHED'}
+
+
 class RFCHAR_PT_MainPanel(bpy.types.Panel):
     bl_label = "RF Character"
     bl_idname = "RFCHAR_PT_main"
@@ -3507,6 +6064,34 @@ class RFCHAR_PT_MainPanel(bpy.types.Panel):
         else:
             layout.operator("rfchar.find_textures", text="Find Textures", icon='VIEWZOOM')
 
+        # ── Master Animation Folder ──
+        layout.separator()
+        box = layout.box()
+        box.label(text="Master Animation Folder", icon='BOOKMARKS')
+        master = _get_master_folder(context)
+        if master:
+            row = box.row(align=True)
+            row.label(text=os.path.basename(master.rstrip(os.sep)) or master, icon='CHECKMARK')
+            row.operator("rfchar.set_master_folder", text="", icon='FILEBROWSER')
+            row.operator("rfchar.clear_master_folder", text="", icon='X')
+            box.prop(scn, 'rfchar_auto_load_anims')
+        else:
+            box.operator("rfchar.set_master_folder", text="Set Folder...", icon='FILE_FOLDER')
+            box.label(text="Auto-loads anims when you import a V3C", icon='INFO')
+
+        # ── Recent Files ──
+        recent = list(scn.get('rf_recent_v3c', []))
+        if recent:
+            box = layout.box()
+            row = box.row()
+            row.label(text="Recent V3Cs", icon='FILE_REFRESH')
+            row.operator("rfchar.clear_recent", text="", icon='X', emboss=False)
+            col = box.column(align=True)
+            for fp in recent[:5]:
+                name = os.path.basename(fp)
+                op = col.operator("rfchar.import_recent", text=name, icon='FILE')
+                op.filepath = fp
+
         # ── Batch File List (only when files scanned) ──
         if arm_obj and len(scn.rfchar_anim_files) > 0:
             layout.separator()
@@ -3539,6 +6124,9 @@ class RFCHAR_PT_MainPanel(bpy.types.Panel):
             col.operator("rfchar.bind_to_armature", icon='CONSTRAINT_BONE')
             col.operator("rfchar.transfer_weights", icon='MOD_DATA_TRANSFER')
             col.operator("rfchar.check_weights", icon='VIEWZOOM')
+            col.separator()
+            col.operator("rfchar.generate_atlas", text="Combine Textures → Atlas", icon='TEXTURE')
+            col.operator("rfchar.fix_texture_names", text="Sync Texture Names", icon='FILE_REFRESH')
 
         # ── Visibility ──
         if arm_obj:
@@ -3558,7 +6146,9 @@ class RFCHAR_PT_MainPanel(bpy.types.Panel):
             box = layout.box()
             box.label(text="Export", icon='EXPORT')
             col = box.column(align=True)
+            col.operator("rfchar.validate_export", text="Validate", icon='CHECKMARK')
             col.operator("export_scene.rf_v3c", text="Export V3C", icon='MESH_DATA')
+            col.operator("rfchar.batch_export_v3c", text="Batch Export", icon='FILE_FOLDER')
             col.separator()
             active_action = arm_obj.animation_data.action if arm_obj.animation_data else None
             if active_action:
@@ -3566,10 +6156,6 @@ class RFCHAR_PT_MainPanel(bpy.types.Panel):
                            text=f"Export '{active_action.name}'", icon='ACTION')
             else:
                 col.label(text="No active animation", icon='INFO')
-            rf_actions = _get_rf_actions(arm_obj)
-            if len(rf_actions) > 1:
-                col.operator("rfchar.export_all_rfa",
-                           text=f"Export All ({len(rf_actions)})", icon='FILE_FOLDER')
 
 
 class RFCHAR_PT_LoadedAnimsPanel(bpy.types.Panel):
@@ -3585,6 +6171,11 @@ class RFCHAR_PT_LoadedAnimsPanel(bpy.types.Panel):
         arm_obj = _find_rf_armature(context)
         return arm_obj is not None and _get_rf_actions(arm_obj)
 
+    def draw_header(self, context):
+        arm_obj = _find_rf_armature(context)
+        rf_actions = _get_rf_actions(arm_obj) if arm_obj else {}
+        self.layout.label(text=f"({len(rf_actions)})")
+
     def draw(self, context):
         layout = self.layout
         arm_obj = _find_rf_armature(context)
@@ -3592,16 +6183,89 @@ class RFCHAR_PT_LoadedAnimsPanel(bpy.types.Panel):
         active_action = arm_obj.animation_data.action if arm_obj.animation_data else None
         active_name = active_action.name if active_action else ""
 
-        col = layout.column(align=True)
-        col.operator("rfchar.rest_pose", text="Rest Pose", icon='ARMATURE_DATA')
-        col.separator()
-        for aname in sorted(rf_actions.keys()):
-            if aname == active_name:
-                col.operator("rfchar.set_active_action", text=aname,
-                           icon='PLAY', depress=True).action_name = aname
-            else:
-                col.operator("rfchar.set_active_action", text=aname,
-                           icon='DOT').action_name = aname
+        # Rest pose button
+        layout.operator("rfchar.rest_pose", text="Rest Pose", icon='ARMATURE_DATA')
+
+        # Search box
+        row = layout.row(align=True)
+        row.prop(context.scene, 'rfchar_anim_search', text="", icon='VIEWZOOM')
+
+        # Grouping toggle
+        row = layout.row(align=True)
+        row.prop(context.scene, 'rfchar_anim_group_by', text="Group by", expand=True)
+
+        search = (context.scene.rfchar_anim_search or '').lower()
+        group_by = context.scene.rfchar_anim_group_by
+
+        def categorize(name):
+            n = name.lower()
+            weapons = {
+                '12mm': ('12mm', 'hg_', '_hg'),
+                'Assault Rifle': ('_ar_', 'arifle', 'ar_'),
+                'Shotgun': ('_sg_', 'shotgun', 'sg_'),
+                'Sniper Rifle': ('_sr_', 'sniper'),
+                'Rocket Launcher': ('_rl_', '_rl.', 'rl_'),
+                'Flamethrower': ('_ft_', 'flamethrower', 'ft_'),
+                'Machine Pistol': ('_mp_', '_smc_', 'smw_'),
+                'Heavy MG': ('_hmac_', 'hmac'),
+                'Grenade': ('_grn_', '_gren_', 'grenade'),
+                'Rail Driver': ('_rr_', 'rrif', 'rail'),
+                'Riot Stick': ('riotstick', 'rstick', '_rs_'),
+                'Riot Shield': ('rshield', 'riotshield'),
+                'Remote Charge': ('rcharge', 'remotecharge', '_rc_'),
+                'Scope AR': ('_sar_', 'scope'),
+                'Shoulder Cannon': ('shoulder', '_sc_'),
+            }
+            for cat, patterns in weapons.items():
+                if any(p in n for p in patterns):
+                    return cat
+            if 'death' in n or '_dead' in n: return 'Death'
+            if 'flinch' in n or 'blast' in n or 'hit_' in n: return 'Flinch/Hit'
+            if 'corpse' in n: return 'Corpse'
+            if any(s in n for s in ('walk', 'run', 'stand', 'crouch', 'idle', 'swim', 'jump', 'freefall', 'sidestep')):
+                return 'Movement'
+            if 'talk' in n or 'cower' in n or 'alarm' in n: return 'Voice/Idle'
+            return 'Other'
+
+        # Filter
+        filtered_names = [n for n in rf_actions.keys() if not search or search in n.lower()]
+
+        if not filtered_names:
+            layout.label(text="No matches", icon='INFO')
+            return
+
+        if group_by == 'CATEGORY':
+            groups = {}
+            for name in filtered_names:
+                cat = categorize(name)
+                groups.setdefault(cat, []).append(name)
+            cat_order = ['Movement', '12mm', 'Assault Rifle', 'Shotgun', 'Sniper Rifle',
+                        'Rocket Launcher', 'Flamethrower', 'Machine Pistol', 'Heavy MG',
+                        'Scope AR', 'Grenade', 'Rail Driver', 'Riot Stick', 'Riot Shield',
+                        'Remote Charge', 'Shoulder Cannon', 'Death', 'Flinch/Hit',
+                        'Corpse', 'Voice/Idle', 'Other']
+            for cat in cat_order:
+                if cat not in groups:
+                    continue
+                names = sorted(groups[cat])
+                box = layout.box()
+                box.label(text=f"{cat} ({len(names)})", icon='DISCLOSURE_TRI_DOWN')
+                col = box.column(align=True)
+                for aname in names:
+                    self._draw_anim_button(col, aname, active_name)
+        else:
+            col = layout.column(align=True)
+            for aname in sorted(filtered_names):
+                self._draw_anim_button(col, aname, active_name)
+
+    def _draw_anim_button(self, col, aname, active_name):
+        is_active = (aname == active_name)
+        row = col.row(align=True)
+        op = row.operator("rfchar.set_active_action", text=aname,
+                         icon='PLAY' if is_active else 'DOT',
+                         depress=is_active)
+        op.action_name = aname
+        row.operator("rfchar.delete_animation", text="", icon='X').action_name = aname
 
 
 class RFCHAR_PT_RequiredAnimsPanel(bpy.types.Panel):
@@ -3647,7 +6311,6 @@ class RFCHAR_PT_RequiredAnimsPanel(bpy.types.Panel):
         for aname in rf_actions.keys():
             loaded_names.add(aname.lower())
             loaded_names.add(aname.lower() + '.rfa')
-            # Also strip common suffixes
             if aname.lower().endswith('.rfa'):
                 loaded_names.add(aname.lower()[:-4])
 
@@ -3661,10 +6324,10 @@ class RFCHAR_PT_RequiredAnimsPanel(bpy.types.Panel):
         box = layout.box()
         row = box.row()
         if missing == 0:
-            row.label(text=f"All {total} animations loaded", icon='CHECKMARK')
+            row.label(text=f"All {total} animations loaded")
         else:
             row.label(text=f"{loaded_count}/{total} loaded, {missing} missing",
-                     icon='ERROR' if missing > 0 else 'CHECKMARK')
+                     icon='ERROR' if missing > 0 else 'NONE')
 
         # Load / Delete buttons
         row = box.row(align=True)
@@ -3675,25 +6338,48 @@ class RFCHAR_PT_RequiredAnimsPanel(bpy.types.Panel):
             row.operator("rfchar.delete_all_animations",
                         text=f"Delete All ({loaded_count})", icon='TRASH')
 
-        # List with checkmarks and delete buttons for loaded
+        # Show remembered folder (if any) with change option
+        folder = arm_obj.get('rf_anim_folder') or context.scene.get('rf_last_anim_folder')
+        if folder:
+            row = box.row(align=True)
+            row.label(text=os.path.basename(folder.rstrip(os.sep)) or folder, icon='FILE_FOLDER')
+            op = row.operator("rfchar.load_required_anims", text="", icon='FILEBROWSER')
+            op.force_browse = True
+
+        # Master folder status
+        try:
+            master = _get_master_folder(context)
+            row = box.row(align=True)
+            if master:
+                row.label(text=f"Master: {os.path.basename(master.rstrip(os.sep)) or master}",
+                         icon='BOOKMARKS')
+                if missing > 0:
+                    row.operator("rfchar.autoload_from_master", text="Auto-Load", icon='IMPORT')
+            else:
+                row.operator("rfchar.set_master_folder", text="Set Master Folder...", icon='FILE_FOLDER')
+        except Exception:
+            pass
+
+        # Toggle between full list and missing-only (collapsible via bl_options)
+        row = box.row(align=True)
+        row.prop(context.scene, 'rfchar_required_filter', expand=True)
+
+        req_filter = context.scene.rfchar_required_filter
+
+        # Flat checklist
         col = box.column(align=True)
         for rfa in sorted(required):
-            name_no_ext = os.path.splitext(rfa)[0].lower()
-            is_loaded = (rfa.lower() in loaded_names or name_no_ext in loaded_names)
+            name_no_ext = os.path.splitext(rfa)[0]
+            name_no_ext_lc = name_no_ext.lower()
+            is_loaded = (rfa.lower() in loaded_names or name_no_ext_lc in loaded_names)
+
+            if req_filter == 'MISSING' and is_loaded:
+                continue
+            if req_filter == 'LOADED' and not is_loaded:
+                continue
+
             icon = 'CHECKBOX_HLT' if is_loaded else 'CHECKBOX_DEHLT'
-            if is_loaded:
-                row = col.row(align=True)
-                row.label(text=os.path.splitext(rfa)[0], icon=icon)
-                # Find the actual action name for deletion
-                actual_name = None
-                for aname in rf_actions.keys():
-                    if aname.lower() == name_no_ext or aname.lower() == rfa.lower():
-                        actual_name = aname
-                        break
-                if actual_name:
-                    row.operator("rfchar.delete_animation", text="", icon='X').action_name = actual_name
-            else:
-                col.label(text=os.path.splitext(rfa)[0], icon=icon)
+            col.label(text=name_no_ext, icon=icon)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3732,6 +6418,16 @@ _classes = (
     RFCHAR_OT_CheckWeights,
     RFCHAR_OT_FindTextures,
     RFCHAR_OT_LoadRequiredAnims,
+    RFCHAR_OT_AutoLoadFromMaster,
+    RFCHAR_OT_SetMasterFolder,
+    RFCHAR_OT_ClearMasterFolder,
+    RFCHAR_OT_ImportRecent,
+    RFCHAR_OT_ClearRecent,
+    RFCHAR_OT_ValidateExport,
+    RFCHAR_OT_RenameActionsToDB,
+    RFCHAR_OT_BatchExportV3C,
+    RFCHAR_OT_GenerateAtlas,
+    RFCHAR_OT_FixTextureNames,
     RFCHAR_OT_ExportRFA,
     RFCHAR_OT_ExportAllRFA,
     RFCHAR_OT_ExportV3C,
@@ -3742,10 +6438,29 @@ _classes = (
 )
 
 def register():
+    print(f"[RF Character] Registering as __name__='{__name__}'")
+    # Register classes, skipping any already registered (handles reload scenarios)
     for c in _classes:
-        bpy.utils.register_class(c)
-    bpy.types.TOPBAR_MT_file_import.append(_menu_import)
-    bpy.types.TOPBAR_MT_file_export.append(_menu_export)
+        try:
+            bpy.utils.register_class(c)
+        except (ValueError, RuntimeError):
+            # Already registered — try re-registering after unregister
+            try:
+                bpy.utils.unregister_class(c)
+                bpy.utils.register_class(c)
+            except Exception as e:
+                print(f"[RF Character] Register failed for {c.__name__}: {e}")
+
+    try:
+        bpy.types.TOPBAR_MT_file_import.append(_menu_import)
+    except Exception:
+        pass
+    try:
+        bpy.types.TOPBAR_MT_file_export.append(_menu_export)
+    except Exception:
+        pass
+
+    # Scene properties (safe to re-assign)
     bpy.types.Scene.rfchar_anim_dir = StringProperty(
         name="Animation Folder",
         subtype='DIR_PATH',
@@ -3754,15 +6469,57 @@ def register():
     )
     bpy.types.Scene.rfchar_anim_files = CollectionProperty(type=RFCHAR_AnimFileItem)
     bpy.types.Scene.rfchar_anim_list_index = IntProperty(name="Index", default=0)
+    bpy.types.Scene.rfchar_anim_search = StringProperty(
+        name="Search", description="Filter animations by name", default="")
+    bpy.types.Scene.rfchar_anim_show_loaded = BoolProperty(
+        name="Show loaded", description="Show already-loaded animations", default=True)
+    bpy.types.Scene.rfchar_anim_show_missing = BoolProperty(
+        name="Show missing", description="Show not-yet-loaded animations", default=True)
+    bpy.types.Scene.rfchar_anim_group_by = EnumProperty(
+        name="Group",
+        items=[('NONE', "None", "Flat list"),
+               ('CATEGORY', "Category", "Group by weapon/state type")],
+        default='CATEGORY',
+    )
+    bpy.types.Scene.rfchar_required_filter = EnumProperty(
+        name="Show",
+        items=[('ALL', "All", "Show all required animations"),
+               ('MISSING', "Missing", "Show only not-yet-loaded"),
+               ('LOADED', "Loaded", "Show only loaded")],
+        default='ALL',
+    )
+    bpy.types.Scene.rfchar_auto_load_anims = BoolProperty(
+        name="Auto-load animations on V3C import",
+        description="When enabled, importing a V3C automatically imports its required animations from the master folder",
+        default=True,
+    )
+
 
 def unregister():
-    bpy.types.TOPBAR_MT_file_export.remove(_menu_export)
-    bpy.types.TOPBAR_MT_file_import.remove(_menu_import)
-    del bpy.types.Scene.rfchar_anim_list_index
-    del bpy.types.Scene.rfchar_anim_files
-    del bpy.types.Scene.rfchar_anim_dir
+    # Remove menu hooks safely
+    for menu_attr, fn in [('TOPBAR_MT_file_export', _menu_export),
+                          ('TOPBAR_MT_file_import', _menu_import)]:
+        try:
+            getattr(bpy.types, menu_attr).remove(fn)
+        except Exception:
+            pass
+
+    # Remove scene properties safely
+    for prop in ('rfchar_auto_load_anims', 'rfchar_required_filter', 'rfchar_anim_group_by',
+                 'rfchar_anim_show_missing', 'rfchar_anim_show_loaded',
+                 'rfchar_anim_search', 'rfchar_anim_list_index',
+                 'rfchar_anim_files', 'rfchar_anim_dir'):
+        try:
+            delattr(bpy.types.Scene, prop)
+        except Exception:
+            pass
+
+    # Unregister classes safely
     for c in reversed(_classes):
-        bpy.utils.unregister_class(c)
+        try:
+            bpy.utils.unregister_class(c)
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     register()
