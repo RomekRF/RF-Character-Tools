@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.9.22 — Repo cleanup
+## v1.9.22 — Repo cleanup (Unreleased)
 
 - Addon folder renamed from `rf_character_import` to `rf_character_tools` to match the repo name and reflect that the addon does both import and export.
 - Removed obsolete v1.8.2 folder from main. Still available via the v1.8.2 tag if needed.
