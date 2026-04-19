@@ -1,5 +1,5 @@
 bl_info = {
-    "name": "RF Character Tools (V3C/V3M/RFA)",
+    "name": "RF Character Tools",
     "author": "RF VFX Tools",
     "version": (1, 9, 21),
     "blender": (4, 0, 0),
