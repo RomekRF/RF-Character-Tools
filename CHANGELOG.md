@@ -3,8 +3,7 @@
 ## v1.9.22 — Repo cleanup (Unreleased)
 
 - Addon folder renamed from `rf_character_import` to `rf_character_tools` to match the repo name and reflect that the addon does both import and export.
-- Removed obsolete v1.8.2 folder from main. Still available via the v1.8.2 tag if needed.
-- **Upgrading:** uninstall the previous version in Blender's Add-on Preferences before installing this release, otherwise both will appear side by side.
+- Removed obsolete v1.8.2 folder from main.
 
 ## v1.9.21 — Rest Pose After Import
 
