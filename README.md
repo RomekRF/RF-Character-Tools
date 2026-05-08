@@ -45,7 +45,7 @@ Blender add-on for importing and exporting Red Faction character meshes (V3C/V3M
 - Works with [Alpine Faction](https://github.com/GooberRF/alpinefaction) (DDS textures, no hard caps)
 
 ## Credits
-
+- [Romek](https://github.com/RomekRF) - Creating blender add-on
 - [rafalh/rf-tools](https://github.com/rafalh/rf-tools) (vmesh) — V3C format reference and coordinate conversion verification
 - [GooberRF/redux](https://github.com/GooberRF/redux) — V3C/RFA export reference
 - [GooberRF/alpinefaction](https://github.com/GooberRF/alpinefaction) — Enhanced RF client
