@@ -6,17 +6,18 @@ Blender add-on for importing and exporting Red Faction character meshes (V3C/V3M
 
 - **V3C/V3M Import:** Character meshes with armature, bone weights, materials, collision spheres, prop points, and LODs
 - **V3C Export:** Full mesh export with skeleton, weights, collision spheres, and prop points
-- **RFA Import/Export:** Batch import stock animations, preview in Blender, re-export with byte-exact round-trip
-- **Custom Mesh Workflow:** Copy weights from the original onto meshes made of any number of parts, check weight coverage, export with up to 7 textures
+- **RFA Import/Export:** Batch import stock animations, preview in Blender; unedited animations re-export byte-exact, edited ones with your changes
+- **Custom Mesh Workflow:** Import OBJ/FBX/glTF/DAE/GLM, fit it to the RF character, copy weights from the original onto any number of parts, check weight coverage, export with up to 7 textures
+- **Textures:** Convert textures to RF-ready TGAs in one click, combine textures into an atlas, see which files each multiplayer character loads
 - **Animation Management:** Browse and switch animations, delete individually or in bulk
 - **Blender 4.0–5.0+** compatible (layered action API supported)
 
 ## Installation
 
-1. Download the latest release zip
-2. In Blender: Edit → Preferences → Add-ons → Install
-3. Select the zip file
-4. Enable "RF Character Tools (V3C/V3M/RFA)"
+1. If version 1.9.x is installed, remove it first (Edit → Preferences → Add-ons, find "RF Character Tools", Uninstall); two copies would load side by side.
+2. Download the zip from the [latest release](https://github.com/RomekRF/RF-Character-Tools/releases/latest).
+3. Blender 4.2 and later: Edit → Preferences → Add-ons → ⌄ (top right) → Install from Disk…, and pick the zip. It installs as an extension and is enabled.
+4. Blender 4.0–4.1: Edit → Preferences → Add-ons → Install…, pick the zip, then enable "RF Character Tools (V3C/V3M/RFA)".
 
 ## Workflow
 
