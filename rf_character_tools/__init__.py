@@ -1,7 +1,7 @@
 bl_info = {
     "name": "RF Character Tools (V3C/V3M/RFA)",
     "author": "RF VFX Tools",
-    "version": (1, 10, 1),
+    "version": (1, 10, 2),
     "blender": (4, 0, 0),
     "location": "File > Import/Export, 3D View > Sidebar > RF Character",
     "description": "Import and export Red Faction character meshes, animations, and rigs",
@@ -2733,12 +2733,12 @@ def _slot_problem(slot):
         return 'ERROR', "name has non-ASCII characters"
     img = slot['image']
     if img is None:
-        return 'WARNING', "no image in Blender (Save Textures skips it)"
+        return 'WARNING', "colour only: Convert makes a texture"
     w, h = img.size[0], img.size[1]
     if not w or not h:
-        return 'WARNING', "image not loaded (file missing?)"
+        return 'WARNING', "image file not found: Find Textures, or Replace Image"
     if (w & (w - 1)) or (h & (h - 1)):
-        return 'WARNING', f"{w}x{h} is not a power of two (Save Textures resizes it)"
+        return 'WARNING', f"{w}x{h}: Convert resizes it to a power of two"
     if ' ' in name:
         return 'WARNING', "name has spaces"
     return None
@@ -2749,7 +2749,7 @@ def _texture_slot_errors(slots):
     errors = []
     if len(slots) > RF_MAX_TEXTURE_SLOTS:
         errors.append(f"{len(slots)} textures, RF allows {RF_MAX_TEXTURE_SLOTS} per character. "
-                      "Give parts the same image, or combine textures (Advanced)")
+                      "Give parts the same image, or use Combine Textures")
     for i, s in enumerate(slots):
         p = _slot_problem(s)
         if p and p[0] == 'ERROR':
@@ -5559,10 +5559,16 @@ def _save_slot_texture(slot, path, resize_pow2=True):
     """Write a texture slot's image as an uncompressed TGA at path.
     24-bit unless the slot uses alpha (RF alpha-tests every texture, so stray alpha
     in an opaque texture would cut holes). Returns an error string or None."""
-    import numpy as np
-    img = slot['image']
-    if img is None:
+    if slot['image'] is None:
         return "no image"
+    return _write_tga(slot['image'], path, bool(slot['flags'] & RF_MAT_ALPHA), resize_pow2)
+
+
+def _write_tga(img, path, use_alpha, resize_pow2=True, max_size=0):
+    """Write a Blender image as an uncompressed TGA (24-bit, or 32-bit with
+    use_alpha), optionally resized to powers of two and capped at max_size.
+    Returns an error string or None."""
+    import numpy as np
     try:
         if img.source == 'FILE' and not img.has_data:
             img.reload()
@@ -5586,14 +5592,20 @@ def _save_slot_texture(slot, path, resize_pow2=True):
         # Float images are held in linear light; TGA wants sRGB
         c = np.clip(rgba[..., :3], 0.0, 1.0)
         rgba[..., :3] = np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(c, 1.0 / 2.4) - 0.055)
-    use_alpha = bool(slot['flags'] & RF_MAT_ALPHA)
+    return _write_rgba_tga(rgba, path, use_alpha, resize_pow2, max_size)
+
+
+def _write_rgba_tga(rgba, path, use_alpha, resize_pow2=True, max_size=0):
+    """Write an (h, w, 4) sRGB float array as an uncompressed TGA."""
+    h, w = rgba.shape[0], rgba.shape[1]
     out = bpy.data.images.new("__rf_texture_export", w, h, alpha=use_alpha)
     try:
         out.pixels.foreach_set(rgba.ravel())
-        if resize_pow2:
-            size = (_nearest_pow2(w), _nearest_pow2(h))
-            if size != (w, h):
-                out.scale(*size)
+        size = (_nearest_pow2(w), _nearest_pow2(h)) if resize_pow2 else (w, h)
+        if max_size:
+            size = (min(size[0], max_size), min(size[1], max_size))
+        if size != (w, h):
+            out.scale(*size)
         out.filepath_raw = path
         out.file_format = 'TARGA_RAW'
         out.save()
@@ -5615,12 +5627,6 @@ def _save_slot_textures(slots, folder, resize_pow2=True):
         else:
             saved.append(s['name'])
     return saved, skipped
-
-
-def _skin_line(slots, skin_name):
-    """An entity.tbl $Skin line listing the slots' textures in slot order."""
-    names = " ".join(f'"{s["name"]}"' for s in slots)
-    return f'$Skin: "{skin_name}" ({names})'
 
 
 class RFCHAR_OT_ExportV3C(bpy.types.Operator, ExportHelper):
@@ -6089,12 +6095,18 @@ class RFCHAR_OT_GenerateAtlas(bpy.types.Operator):
 
     @staticmethod
     def _meshes(context):
-        """Selected meshes (or the active one), never the imported RF meshes."""
+        """Selected meshes (or the active one), else the parts bound to the RF
+        armature; never the imported RF meshes."""
         meshes = [o for o in context.selected_objects
                   if o.type == 'MESH' and not o.get('rf_original_mesh')]
         active = context.active_object
         if not meshes and active and active.type == 'MESH' and not active.get('rf_original_mesh'):
             meshes = [active]
+        if not meshes:
+            arm_obj = _find_rf_armature(context)
+            if arm_obj:
+                meshes = [o for o in _export_mesh_objects(context, arm_obj)[0]
+                          if not o.get('rf_original_mesh')]
         return meshes
 
     def _included(self, img):
@@ -6541,56 +6553,358 @@ class RFCHAR_OT_FixTextureNames(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class RFCHAR_OT_CopySkinLine(bpy.types.Operator):
-    bl_idname = "rfchar.copy_skin_line"
-    bl_label = "Copy Skin Line"
-    bl_description = (
-        "Copy an entity.tbl $Skin line listing your textures in slot order (the line is also shown in "
-        "the Textures panel). A skin replaces a character's textures by slot number, so a stock skin "
-        "would put stock textures on your mesh. Paste the line under the character's entity, raise its "
-        "$Num Skins by one and use the skin name as $SkinName in pc_multi.tbl"
-    )
+# Stock multiplayer characters (pc_multi.tbl) by the mesh they use, with the
+# entity.tbl skin each one wears: (screen name, skin name, skin textures in
+# material order across all LODs). No skin: the game uses the mesh's own names.
+_RF_MP_CHARACTERS = {
+    'admin_fem.v3c': [
+        ('Female Administrator 1', '', None),
+    ],
+    'admin_male.v3c': [
+        ('Gryphon', 'gryphon', ['gryph_limbs.tga', 'gryph_chest.tga', 'gryph_face.tga', 'gryph_limbs-mip2.tga', 'gryph_chest-mip2.tga', 'gryph_face-mip2.tga', 'gryph_limbs-mip3.tga', 'gryph_chest-mip3.tga', 'gryph_face-mip3.tga']),
+    ],
+    'admin_male2.v3c': [
+        ('Big Administrator 2', 'e', ['fat_admin01_P01b.tga', 'fat_admin01_P02b.tga', 'fat_admin01_P03e.tga', 'fat_admin01_P01b-mip2.tga', 'fat_admin01_P02b-mip2.tga', 'fat_admin01_P03e-mip2.tga', 'fat_admin01_P01b-mip3.tga', 'fat_admin01_P02b-mip3.tga', 'fat_admin01_P03e-mip3.tga']),
+    ],
+    'elite_security_guard.v3c': [
+        ('Elite Guard', 'e', ['elite_limbs.tga', 'elite_chest.tga', 'elite_face_e.tga', 'elite_limbs-mip2.tga', 'elite_chest-mip2.tga', 'elite_face_e-mip2.tga', 'elite_limbs-mip3.tga', 'elite_chest-mip3.tga', 'elite_face_e-mip3.tga']),
+    ],
+    'env_scientist.v3c': [
+        ('Envirosuit Scientist 1', '', None),
+    ],
+    'envirosuit_guard.v3c': [
+        ('Envirosuit Guard', 'd', ['enviro_guard_limbs.tga', 'enviro_guard_chest.tga', 'enviro_guard_face_g.tga', 'enviro_guard_glass.tga', 'enviro_guard_limbs_mip1.tga', 'enviro_guard_chest_mip1.tga', 'enviro_guard_face_g-mip1.tga', 'enviro_guard_glass_mip1.tga', 'enviro_guard_limbs_mip2.tga', 'enviro_guard_chest_mip2.tga', 'enviro_guard_face_g-mip2.tga', 'enviro_guard_glass_mip2.tga']),
+    ],
+    'eos.v3c': [
+        ('Eos', '', None),
+    ],
+    'hendrix.v3c': [
+        ('Hendrix', 'hendrix', ['hendrix_1.tga', 'hendrix_2.tga', 'hendrix_3.tga', 'hendrix_1.tga', 'hendrix_1-mip2.tga', 'hendrix_2-mip2.tga', 'hendrix_3-mip2.tga', 'hendrix_1-mip2.tga', 'hendrix_1-mip3.tga', 'hendrix_2-mip3.tga', 'hendrix_3-mip3.tga', 'hendrix_1-mip3.tga']),
+    ],
+    'masako.v3c': [
+        ('Masako', '', None),
+    ],
+    'medic01.v3c': [
+        ('Medic', 'e', ['med_append-bloody.tga', 'med_chest-bloody.tga', 'med_face_e.tga', 'med_append-bloody_mip1.tga', 'med_chest-bloody_mip1.tga', 'med_face_e-mip2.tga', 'med_append-bloody_mip2.tga', 'med_chest-bloody_mip2.tga', 'med_face_e-mip3.tga']),
+    ],
+    'merc_grunt.v3c': [
+        ('Grunt Mercenary', 'd', ['MercGrunt_Parts01d.tga', 'MercGrunt_Parts02d.tga', 'MercGrunt_Parts03d.tga', 'MercGrunt_Parts01d.tga', 'MercGrunt_Parts01d-mip2.tga', 'MercGrunt_Parts02d-mip2.tga', 'MercGrunt_Parts03d-mip2.tga', 'MercGrunt_Parts01d-mip3.tga', 'MercGrunt_Parts02d-mip3.tga', 'MercGrunt_Parts03d-mip3.tga']),
+    ],
+    'miner.v3c': [
+        ('Envirosuit Parker', 'parker', ['Envro_Torso.tga', 'Envro_LegsArms.tga', 'Parker_face.tga', 'Envro_FacePlate.tga', 'Envro_Torso-mip2.tga', 'Envro_LegsArms-mip2.tga', 'Parker_face-mip2.tga', 'Envro_FacePlate.tga', 'Envro_Torso-mip3.tga', 'Envro_LegsArms-mip3.tga', 'Parker_face-mip3.tga', 'Envro_FacePlate.tga']),
+    ],
+    'multi_guard2.v3c': [
+        ('Ultor Guard 2', '', None),
+    ],
+    'non_env_miner_fem.v3c': [
+        ('Female Miner', 'f', ['non_miner_fem01_01b.tga', 'non_miner_fem01_02.tga', 'non_miner_fem01_03f.tga', 'non_miner_fem01_04f.tga', 'non_miner_fem01_01b-mip2.tga', 'non_miner_fem01_02-mip2.tga', 'non_miner_fem01_03-mip2.tga', 'non_miner_fem01_04f-mip2.tga', 'non_miner_fem01_01b-mip3.tga', 'non_miner_fem01_02-mip3.tga', 'non_miner_fem01_03-mip3.tga', 'non_miner_fem01_04f-mip3.tga']),
+    ],
+    'nurse1.v3c': [
+        ('Nurse', 'd', ['nurse02_01.tga', 'nurse02_02.tga', 'nurse02_03.tga', 'nurse02_04c.tga', 'nurse02_01-mip2.tga', 'nurse02_02-mip2.tga', 'nurse01_03-mip2.tga', 'nurse02_04c-mip2.tga', 'nurse02_01-mip3.tga', 'nurse02_02-mip3.tga', 'nurse01_03-mip3.tga', 'nurse02_04c-mip3.tga']),
+    ],
+    'parker_sci.v3c': [
+        ('Scientist Parker', '', None),
+    ],
+    'parker_suit.v3c': [
+        ('Executive Parker', '', None),
+    ],
+    'riot_guard.v3c': [
+        ('Riot Guard', '', None),
+    ],
+    'tech01.v3c': [
+        ('Technician', '', None),
+    ],
+    'ult_scientist.v3c': [
+        ('Scientist', '', None),
+    ],
+}
 
-    skin_name: StringProperty(name="Skin name", default="",
-                              description="Skin name to write; empty uses the name in the Textures panel")
+
+def _mp_characters(arm_obj):
+    """(mesh file name, stock multiplayer characters using it) for the RF
+    character this armature came from."""
+    source = (arm_obj.get('rf_source_file', '') or '').lower()
+    key = os.path.splitext(source)[0] + '.v3c' if source else ''
+    return key, _RF_MP_CHARACTERS.get(key, [])
+
+
+def _skin_texture_count(arm_obj, skin):
+    """How many of a skin's names belong to the full-detail mesh. Skins list every
+    LOD in material order; the RF mesh's own texture count is LOD 0's share."""
+    original = _rf_original_mesh(arm_obj)
+    n = len(original.material_slots) if original else len(skin)
+    return min(n, len(skin))
+
+
+def _active_texture_slot(context, slots):
+    """The texture picked in the Textures panel (clamped), or -1 with none."""
+    if not slots:
+        return -1
+    return min(max(context.scene.rfchar_tex_active, 0), len(slots) - 1)
+
+
+def _texture_panel_state(context):
+    """(armature, parts, slots, slot_of, note) for the texture tools."""
+    arm_obj = _find_rf_armature(context)
+    if not arm_obj:
+        return None, [], [], {}, "No RF armature found"
+    objs, note = _export_mesh_objects(context, arm_obj)
+    if not objs:
+        return arm_obj, [], [], {}, note
+    slots, slot_of = _texture_slots(objs)
+    return arm_obj, objs, slots, slot_of, note
+
+
+def _set_material_image(mat, old_img, new_img):
+    """Point the material's image node(s) showing old_img at new_img; with none,
+    add an image node on Base Color."""
+    mat.use_nodes = True
+    nt = mat.node_tree
+    nodes = [n for n in nt.nodes if n.type == 'TEX_IMAGE' and old_img is not None and n.image == old_img]
+    if not nodes:
+        bsdf = nt.nodes.get('Principled BSDF') or nt.nodes.new('ShaderNodeBsdfPrincipled')
+        tex = nt.nodes.new('ShaderNodeTexImage')
+        tex.location = (-300, 300)
+        nt.links.new(tex.outputs['Color'], bsdf.inputs['Base Color'])
+        nodes = [tex]
+    for n in nodes:
+        n.image = new_img
+
+
+def _material_base_color(mat):
+    """The Principled Base Color of a material without a texture (linear RGBA)."""
+    if mat and mat.use_nodes and mat.node_tree:
+        bsdf = mat.node_tree.nodes.get('Principled BSDF')
+        if bsdf and 'Base Color' in bsdf.inputs:
+            return tuple(bsdf.inputs['Base Color'].default_value)
+    if mat:
+        return tuple(mat.diffuse_color)
+    return (0.8, 0.8, 0.8, 1.0)
+
+
+def _rf_safe_tex_name(name, taken):
+    """An RF-safe '<name>.tga': ASCII letters, digits, '_' and '-', at most 31
+    characters with the extension, unique among taken (lower-case names)."""
+    base = _normalize_tex_name(name)[:-4]
+    base = ''.join(c if c.isascii() and (c.isalnum() or c in '_-') else '_' for c in base)
+    base = base[:RF_MAX_TEX_NAME_LEN - 4] or 'texture'
+    cand, n = base, 2
+    while (cand + '.tga').lower() in taken:
+        suffix = f"_{n}"
+        cand = base[:RF_MAX_TEX_NAME_LEN - 4 - len(suffix)] + suffix
+        n += 1
+    taken.add((cand + '.tga').lower())
+    return cand + '.tga'
+
+
+class RFCHAR_OT_TextureSlotSelect(bpy.types.Operator):
+    bl_idname = "rfchar.texture_slot_select"
+    bl_label = "Select Texture"
+    bl_description = "Pick this texture to rename it, replace its image or select its faces"
+    bl_options = {'INTERNAL'}
+
+    index: IntProperty(default=0)
 
     def execute(self, context):
-        arm_obj = _find_rf_armature(context)
-        if not arm_obj:
-            self.report({'ERROR'}, "No RF armature found")
+        context.scene.rfchar_tex_active = self.index
+        return {'FINISHED'}
+
+
+class RFCHAR_OT_SelectTextureFaces(bpy.types.Operator):
+    bl_idname = "rfchar.select_texture_faces"
+    bl_label = "Select Faces"
+    bl_description = "Select the faces that use this texture, in Edit Mode on your parts"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    index: IntProperty(default=-1)
+
+    def execute(self, context):
+        arm_obj, objs, slots, slot_of, note = _texture_panel_state(context)
+        if not slots:
+            self.report({'ERROR'}, note or "No textures")
             return {'CANCELLED'}
-        objs, note = _export_mesh_objects(context, arm_obj)
-        if not objs:
-            self.report({'ERROR'}, note)
+        si = self.index if 0 <= self.index < len(slots) else _active_texture_slot(context, slots)
+        context.scene.rfchar_tex_active = si
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        hit = []
+        for o in objs:
+            mis = {mi for (name, mi), s in slot_of.items() if name == o.name and s == si}
+            me = o.data
+            idx = [0] * len(me.polygons)
+            me.polygons.foreach_get('material_index', idx)
+            fsel = [mi in mis for mi in idx]
+            vsel = [False] * len(me.vertices)
+            for p, on in zip(me.polygons, fsel):
+                if on:
+                    for v in p.vertices:
+                        vsel[v] = True
+            me.polygons.foreach_set('select', fsel)
+            me.vertices.foreach_set('select', vsel)
+            me.edges.foreach_set('select', [vsel[e.vertices[0]] and vsel[e.vertices[1]] for e in me.edges])
+            me.update()
+            if any(fsel):
+                hit.append(o)
+        if not hit:
+            self.report({'WARNING'}, "No faces use this texture")
             return {'CANCELLED'}
-        slots, _ = _texture_slots(objs)
-        name = self.skin_name or context.scene.rfchar_skin_name or "custom"
-        line = _skin_line(slots, name)
-        print(f"[RF Character] {line}")
+        _select_only(context, hit, hit[0])
+        bpy.ops.object.mode_set(mode='EDIT')
+        context.tool_settings.mesh_select_mode = (False, False, True)
+        self.report({'INFO'}, f"Selected the faces using {slots[si]['name']}")
+        return {'FINISHED'}
 
-        wm = context.window_manager
-        wm.clipboard = line
-        if wm.clipboard != line:
-            self.report({'WARNING'}, "Couldn't write to the clipboard. The line is shown in the "
-                                     "Textures panel and in the System Console")
-            return {'FINISHED'}
 
-        def draw(menu, _context):
-            col = menu.layout.column(align=True)
-            col.label(text=f'$Skin: "{name}" (')
-            for s in slots:
-                col.label(text=f'      "{s["name"]}"')
-            col.label(text=")")
-            col.separator()
-            col.label(text="Paste it under the character's other $Skin lines in entity.tbl,")
-            col.label(text="raise that entity's $Num Skins by one, then set")
-            col.label(text=f'$SkinName: "{name}" on the character in pc_multi.tbl')
+class RFCHAR_OT_ReplaceTexture(bpy.types.Operator, ImportHelper):
+    bl_idname = "rfchar.replace_texture"
+    bl_label = "Replace Image"
+    bl_description = "Pick a new image file for this texture; every material using it switches to the new image"
+    bl_options = {'REGISTER', 'UNDO'}
 
+    filter_glob: StringProperty(default="*.tga;*.png;*.jpg;*.jpeg;*.dds;*.bmp;*.tif;*.tiff;*.psd",
+                                options={'HIDDEN'})
+    index: IntProperty(default=-1)
+
+    def execute(self, context):
+        arm_obj, objs, slots, slot_of, note = _texture_panel_state(context)
+        if not slots:
+            self.report({'ERROR'}, note or "No textures")
+            return {'CANCELLED'}
+        si = self.index if 0 <= self.index < len(slots) else _active_texture_slot(context, slots)
+        slot = slots[si]
+        if not slot['materials']:
+            self.report({'ERROR'}, "This texture has no material to change. Give those faces a material first")
+            return {'CANCELLED'}
         try:
-            wm.popup_menu(draw, title="Skin line copied to the clipboard", icon='COPYDOWN')
-        except Exception:
-            pass
-        self.report({'INFO'}, f"Copied: {line}")
+            img = bpy.data.images.load(self.filepath, check_existing=True)
+        except Exception as e:
+            self.report({'ERROR'}, f"Can't load the image: {e}")
+            return {'CANCELLED'}
+        for mat in slot['materials']:
+            _set_material_image(mat, slot['image'], img)
+        self.report({'INFO'}, f"Texture {si + 1} now uses {img.name}")
+        return {'FINISHED'}
+
+
+class RFCHAR_OT_ConvertTextures(bpy.types.Operator):
+    bl_idname = "rfchar.convert_textures"
+    bl_label = "Convert Textures for RF"
+    bl_description = (
+        "Write every texture of your mesh as an RF-ready TGA into one folder (power-of-two size, safe name, "
+        "24-bit, or 32-bit when it uses alpha) and switch your materials to those files. A material with "
+        "only a colour gets a small texture of that colour. Your original files are not touched"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    directory: StringProperty(name="Folder", subtype='DIR_PATH',
+                              description="Where the RF textures are written")
+    max_size: EnumProperty(
+        name="Largest size",
+        description="Bigger textures are scaled down to this",
+        items=[('256', "256", ""), ('512', "512", ""), ('1024', "1024", ""),
+               ('2048', "2048", ""), ('4096', "4096", "")],
+        default='1024',
+    )
+
+    def invoke(self, context, event):
+        if not self.directory:
+            remembered = context.scene.get('rf_texture_folder')
+            if bpy.data.filepath:
+                self.directory = os.path.join(os.path.dirname(bpy.data.filepath), 'rf_textures')
+            elif remembered:
+                self.directory = remembered
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, context):
+        layout = self.layout
+        _, _, slots, _, note = _texture_panel_state(context)
+        colour_only = sum(1 for s in slots if s['image'] is None and s['materials'])
+        layout.label(text=f"{len(slots)} texture{'s' if len(slots) != 1 else ''}"
+                          + (f", {colour_only} from a colour only" if colour_only else ""))
+        layout.prop(self, "directory")
+        layout.prop(self, "max_size")
+
+    def execute(self, context):
+        import numpy as np
+        arm_obj, objs, slots, slot_of, note = _texture_panel_state(context)
+        if not slots:
+            self.report({'ERROR'}, note or "No textures")
+            return {'CANCELLED'}
+        folder = bpy.path.abspath(self.directory) if self.directory else ""
+        if not folder:
+            self.report({'ERROR'}, "Pick a folder for the RF textures (save the .blend to get one by default)")
+            return {'CANCELLED'}
+        os.makedirs(folder, exist_ok=True)
+
+        taken = set()
+        done = 0
+        problems = []
+        for i, s in enumerate(slots):
+            mats = s['materials']
+            if not mats:
+                problems.append(f"{i + 1}: no material")
+                continue
+            src = s['image']
+            name = _rf_safe_tex_name(src.name if src is not None else mats[0].name, taken)
+            path = os.path.join(folder, name)
+            use_alpha = bool(s['flags'] & RF_MAT_ALPHA)
+            if src is not None:
+                err = _write_tga(src, path, use_alpha, True, int(self.max_size))
+            else:
+                r, g, b, a = _material_base_color(mats[0])
+                c = np.clip(np.array([r, g, b], dtype=np.float32), 0.0, 1.0)
+                c = np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(c, 1.0 / 2.4) - 0.055)
+                rgba = np.ones((64, 64, 4), dtype=np.float32)
+                rgba[..., :3] = c
+                err = _write_rgba_tga(rgba, path, False)
+            if err:
+                problems.append(f"{i + 1} {s['name']}: {err}")
+                continue
+            new_img = bpy.data.images.load(path, check_existing=True)
+            new_img.reload()
+            for mat in mats:
+                _set_material_image(mat, src, new_img)
+            done += 1
+
+        context.scene['rf_texture_folder'] = folder
+        for p in problems:
+            self.report({'WARNING'}, f"Not converted: {p}")
+        self.report({'INFO'}, f"Converted {done} texture{'s' if done != 1 else ''} into {folder}")
+        return {'FINISHED'} if done else {'CANCELLED'}
+
+
+class RFCHAR_OT_UseGameTextureNames(bpy.types.Operator):
+    bl_idname = "rfchar.use_game_texture_names"
+    bl_label = "Use These Names"
+    bl_description = (
+        "Rename your textures, in order, to the names this character's skin loads, so your files replace "
+        "those stock textures. They replace them for every character that uses the same files"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    character: IntProperty(default=0)
+
+    def execute(self, context):
+        arm_obj, objs, slots, slot_of, note = _texture_panel_state(context)
+        if not slots:
+            self.report({'ERROR'}, note or "No textures")
+            return {'CANCELLED'}
+        _, chars = _mp_characters(arm_obj)
+        if not 0 <= self.character < len(chars) or not chars[self.character][2]:
+            self.report({'ERROR'}, "That character has no skin; your own names are used")
+            return {'CANCELLED'}
+        screen, skin_name, skin = chars[self.character]
+        n = _skin_texture_count(arm_obj, skin)
+        for s, target in zip(slots[:n], skin[:n]):
+            if s['image'] is not None:
+                s['image'].name = target
+            elif s['materials']:
+                s['materials'][0].name = os.path.splitext(target)[0]
+        self.report({'INFO'}, f"Renamed {min(n, len(slots))} textures to {screen}'s skin")
+        if len(slots) > n:
+            self.report({'WARNING'}, f"{screen}'s skin covers {n} textures; textures {n + 1}-{len(slots)} "
+                                     f"show the wrong image in game. Combine down to {n}")
         return {'FINISHED'}
 
 
@@ -6734,62 +7048,72 @@ class RFCHAR_PT_TexturesPanel(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        arm_obj = _find_rf_armature(context)
-        objs, note = _export_mesh_objects(context, arm_obj)
-        if not objs:
-            layout.label(text=note, icon='INFO')
+        arm_obj, objs, slots, slot_of, note = _texture_panel_state(context)
+        if not slots:
+            layout.label(text=note or "No textures", icon='INFO')
             return
-        slots, _ = _texture_slots(objs)
 
+        row = layout.row()
+        row.scale_y = 1.3
+        row.operator("rfchar.convert_textures", icon='IMAGE_DATA')
+
+        # ── The textures, click one to work on it ──
         over = len(slots) > RF_MAX_TEXTURE_SLOTS
-        layout.label(text=f"{len(slots)} of {RF_MAX_TEXTURE_SLOTS} texture slots",
+        layout.label(text=f"{len(slots)} of {RF_MAX_TEXTURE_SLOTS} textures used"
+                          + (" (too many)" if over else ""),
                      icon='ERROR' if over else 'TEXTURE')
-        if over:
-            layout.label(text="Share images, or combine (Advanced)")
-
+        active = _active_texture_slot(context, slots)
+        col = layout.column(align=True)
         for i, s in enumerate(slots):
-            box = layout.box()
-            col = box.column(align=True)
-            row = col.split(factor=0.12, align=True)
-            row.label(text=f"{i}")
-            if s['image'] is not None:
-                row.prop(s['image'], "name", text="")
-            elif s['materials']:
-                row.prop(s['materials'][0], "name", text="")
-            else:
-                row.label(text=s['name'])
-            details = [s['name']]
-            img = s['image']
-            if img is not None and img.size[0]:
-                details.append(f"{img.size[0]}x{img.size[1]}")
-            if s['flags'] & RF_MAT_ALPHA:
-                details.append("alpha")
-            col.label(text="  " + "  ·  ".join(details))
             p = _slot_problem(s)
-            if p:
-                col.label(text=p[1], icon=p[0])
+            img = s['image']
+            size = f"   {img.size[0]}x{img.size[1]}" if img is not None and img.size[0] else ""
+            icon = ('ERROR' if p[0] == 'ERROR' else 'INFO') if p else 'TEXTURE'
+            op = col.operator("rfchar.texture_slot_select", text=f"{i + 1}.  {s['name']}{size}",
+                              icon=icon, depress=(i == active))
+            op.index = i
 
-        original = _rf_original_mesh(arm_obj)
-        if original and original not in objs:
-            box = layout.box()
-            box.label(text="RF mesh slots (stock skins follow these):")
-            col = box.column(align=True)
-            for i, slot in enumerate(original.material_slots):
-                if slot.material:
-                    col.label(text=f"  {i}  {_material_tex_name(slot.material)}")
-
-        # The skin line, readable here even if the clipboard fails
+        s = slots[active]
         box = layout.box()
-        box.label(text="Skin line for entity.tbl:")
+        box.label(text=f"Texture {active + 1}")
+        if s['image'] is not None:
+            box.prop(s['image'], "name", text="Rename")
+        elif s['materials']:
+            box.prop(s['materials'][0], "name", text="Rename")
+            box.label(text="Colour only, no image yet")
         row = box.row(align=True)
-        row.prop(context.scene, "rfchar_skin_name", text="")
-        row.operator("rfchar.copy_skin_line", text="Copy", icon='COPYDOWN')
-        name = context.scene.rfchar_skin_name or "custom"
-        col = box.column(align=True)
-        col.label(text=f'$Skin: "{name}" (')
-        for s in slots:
-            col.label(text=f'      "{s["name"]}"')
-        col.label(text=")")
+        row.operator("rfchar.replace_texture", text="Replace Image", icon='FILEBROWSER').index = active
+        row.operator("rfchar.select_texture_faces", text="Select Faces", icon='FACESEL').index = active
+        if s['flags'] & RF_MAT_ALPHA:
+            box.label(text="Uses alpha (saved 32-bit)")
+        p = _slot_problem(s)
+        if p:
+            box.label(text=p[1], icon=p[0])
+
+        layout.operator("rfchar.generate_atlas", text="Combine Textures...", icon='TEXTURE')
+
+        # ── What the game loads ──
+        key, chars = _mp_characters(arm_obj)
+        box = layout.box()
+        box.label(text="In multiplayer", icon='COMMUNITY')
+        if not chars:
+            box.label(text=f"No stock character uses {key or 'this mesh'}")
+            return
+        for ci, (screen, skin_name, skin) in enumerate(chars):
+            if not skin:
+                box.label(text=f"{screen}: your names are used", icon='CHECKMARK')
+                continue
+            n = _skin_texture_count(arm_obj, skin)
+            names = [x['name'].lower() for x in slots[:n]]
+            matches = names == [x.lower() for x in skin[:len(names)]] and len(slots) <= n
+            box.label(text=f'{screen}: skin "{skin_name}" loads', icon='CHECKMARK' if matches else 'ERROR')
+            col = box.column(align=True)
+            for i in range(n):
+                col.label(text=f"   {i + 1}.  {skin[i]}")
+            if len(slots) > n:
+                box.label(text=f"Only {n} textures fit this skin", icon='ERROR')
+            if not matches:
+                box.operator("rfchar.use_game_texture_names", icon='SORTALPHA').character = ci
 
 
 class RFCHAR_PT_ExportPanel(bpy.types.Panel):
@@ -6907,7 +7231,6 @@ class RFCHAR_PT_AdvancedPanel(bpy.types.Panel):
         layout.separator()
         col = layout.column(align=True)
         col.label(text="Textures:")
-        col.operator("rfchar.generate_atlas", text="Combine Textures → Atlas", icon='TEXTURE')
         col.operator("rfchar.fix_texture_names", text="Sync Texture Names", icon='FILE_REFRESH')
 
 
@@ -7171,7 +7494,11 @@ _classes = (
     RFCHAR_OT_DeleteAllAnimations,
     RFCHAR_OT_CheckWeights,
     RFCHAR_OT_CleanWeights,
-    RFCHAR_OT_CopySkinLine,
+    RFCHAR_OT_TextureSlotSelect,
+    RFCHAR_OT_SelectTextureFaces,
+    RFCHAR_OT_ReplaceTexture,
+    RFCHAR_OT_ConvertTextures,
+    RFCHAR_OT_UseGameTextureNames,
     RFCHAR_OT_FindTextures,
     RFCHAR_OT_LoadRequiredAnims,
     RFCHAR_OT_AutoLoadFromMaster,
@@ -7254,10 +7581,11 @@ def register():
         description="When enabled, importing a V3C automatically imports its required animations from the master folder",
         default=True,
     )
-    bpy.types.Scene.rfchar_skin_name = StringProperty(
-        name="Skin name",
-        description="Name of the entity.tbl skin; pc_multi.tbl picks it with $SkinName",
-        default="custom",
+    bpy.types.Scene.rfchar_tex_active = IntProperty(
+        name="Active texture",
+        description="Texture picked in the Textures panel",
+        default=0,
+        min=0,
     )
 
 
@@ -7271,7 +7599,7 @@ def unregister():
             pass
 
     # Remove scene properties safely
-    for prop in ('rfchar_skin_name', 'rfchar_auto_load_anims', 'rfchar_required_filter', 'rfchar_anim_group_by',
+    for prop in ('rfchar_tex_active', 'rfchar_auto_load_anims', 'rfchar_required_filter', 'rfchar_anim_group_by',
                  'rfchar_anim_show_missing', 'rfchar_anim_show_loaded',
                  'rfchar_anim_search', 'rfchar_anim_list_index',
                  'rfchar_anim_files', 'rfchar_anim_dir'):

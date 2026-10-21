@@ -25,17 +25,23 @@ The sidebar follows these steps:
 1. **Import the RF character.** Import V3C, then Find Textures to show the stock textures.
 2. **Your mesh.** Import Mesh, then move, rotate and scale it over the RF mesh. Transforms don't need applying; export writes the mesh where it sits in the scene.
 3. **Weights.** Select every part of your mesh and press Copy Weights from RF Mesh. It binds the parts to the RF armature, copies the RF character's weights from the nearest point of its surface, removes leftover rigs (for example from an FBX) and keeps the 4 strongest bones per vertex, as the game does. Check Weights selects any vertex left without weights; fix spots in Weight Paint, then press Limit to 4 Bones.
-4. **Textures.** The panel lists the texture slots the V3C will have, in order. RF allows 7 per character and names of up to 31 characters including `.tga`. Rename a texture by editing its name there.
+4. **Textures.** Press Convert Textures for RF: every texture of your mesh is written as an RF-ready TGA into one folder and your materials switch to those files, so Blender shows what the game gets. Click a texture in the list to rename it, replace its image or select the faces that use it. RF allows 7 textures per character; Combine Textures merges some into one.
 5. **Export.** Export V3C writes every visible part bound to the armature as one mesh, and saves each texture as an uncompressed `.tga` next to the V3C.
 
-Animations and the master animation folder are in the Animations panel. Bind with Auto Weights and Combine Textures are under Advanced.
+Animations and the master animation folder are in the Animations panel. Bind with Auto Weights is under Advanced.
 
-## Textures and skins
+## Textures
 
+- Convert Textures for RF writes uncompressed TGA: power-of-two size up to a limit you choose (1024 by default), 24-bit, or 32-bit when the material uses the image's alpha. Names keep to ASCII letters, digits, `_` and `-`, 31 characters at most with `.tga`. A material with only a colour gets a 64×64 texture of that colour. Your original files are not changed.
 - Each texture slot is one texture. Parts that use the same image share a slot.
-- Opaque textures are saved as 24-bit TGA and alpha textures (an image Alpha output connected in the material) as 32-bit TGA, resized to a power of two.
-- An entity skin (`$Skin` in entity.tbl, chosen by `$SkinName` in pc_multi.tbl) replaces a character's textures by slot number. A stock skin therefore puts the stock textures on a custom mesh. The Textures panel shows a `$Skin` line that lists your textures in slot order, under the skin name you type there; Copy puts it on the clipboard. Paste it under the character's entity in entity.tbl, raise its `$Num Skins` by one, and set `$SkinName` to that name on the character in pc_multi.tbl.
-- Generate Texture Atlas (Advanced) lists every texture with a tick box; only ticked textures are combined, the rest keep their own materials.
+- Combine Textures lists every texture with a tick box; only ticked textures are merged into the atlas, the rest keep their own materials.
+
+## Multiplayer characters and skins
+
+Some multiplayer characters wear a skin (`$SkinName` in pc_multi.tbl, `$Skin` in entity.tbl). A skin replaces the mesh's textures by number, so the game loads the skin's files instead of the names in your V3C. The Textures panel shows, for each stock multiplayer character that uses the mesh you are replacing, which files the game loads:
+
+- No skin (for example Executive Parker on parker_suit.v3c): your texture names are used as they are.
+- A skin (for example Envirosuit Parker on miner.v3c): Use These Names renames your textures, in order, to the skin's files, so the files you ship replace those stock textures. They replace them for every character that uses the same files, and only as many textures as the skin has fit.
 
 ## Custom Mesh Tips
 

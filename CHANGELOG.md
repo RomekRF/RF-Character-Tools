@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.10.2 — Textures panel
+
+- New Convert Textures for RF: writes every texture of your mesh as an RF-ready TGA into one folder (power-of-two size up to a chosen limit, 24/32-bit, safe names of 31 characters or fewer) and switches your materials to those files. Materials with only a colour get a texture of that colour.
+- The texture list is clickable. The picked texture can be renamed, given a new image (Replace Image) or have its faces selected (Select Faces).
+- Combine Textures moved into the Textures panel; with nothing selected it works on the parts bound to the RF armature.
+- New "In multiplayer" box: for each stock multiplayer character that uses the mesh you are replacing, shows whether your texture names are used or which files its skin loads, with Use These Names to rename your textures to that skin's files.
+- Removed Copy Skin Line and the RF-mesh slot list.
+
 ## v1.10.1
 
 - Generate Texture Atlas lists every texture with a tick box. Only ticked textures go into the atlas; faces using unticked textures keep their material and UVs, and materials without an image are kept too. The atlas material gets alpha when a ticked texture used it, and an existing atlas material is updated in place instead of being deleted.
