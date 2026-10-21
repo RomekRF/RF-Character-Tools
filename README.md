@@ -23,7 +23,7 @@ Blender add-on for importing and exporting Red Faction character meshes (V3C/V3M
 The sidebar follows these steps:
 
 1. **Import the RF character.** Import V3C, then Find Textures to show the stock textures.
-2. **Your mesh.** Import Mesh, then move, rotate and scale it over the RF mesh. Transforms don't need applying; export writes the mesh where it sits in the scene.
+2. **Your mesh.** Import Mesh (OBJ, FBX, glTF, DAE, GLM, STL, PLY); the new parts are left selected. Fit to RF Mesh scales them to the RF character's height and stands them on its spot; then move, rotate and scale them over the RF mesh as needed. Transforms don't need applying; export writes the mesh where it sits in the scene.
 3. **Weights.** Select every part of your mesh and press Copy Weights from RF Mesh. It binds the parts to the RF armature, copies the RF character's weights from the nearest point of its surface, removes leftover rigs (for example from an FBX) and keeps the 4 strongest bones per vertex, as the game does. Check Weights selects any vertex left without weights; fix spots in Weight Paint, then press Limit to 4 Bones.
 4. **Textures.** Press Convert Textures for RF: every texture of your mesh is written as an RF-ready TGA into one folder and your materials switch to those files, so Blender shows what the game gets. Click a texture in the list to rename it, replace its image or select the faces that use it. RF allows 7 textures per character; Combine Textures merges some into one.
 5. **Export.** Export V3C writes every visible part bound to the armature as one mesh, and saves each texture as an uncompressed `.tga` next to the V3C.

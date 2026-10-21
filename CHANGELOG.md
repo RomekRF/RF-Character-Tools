@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.10.4 — Review fixes
+
+Checked against all 95 stock character meshes (import, export, compare) and 1,009 stock animations.
+
+V3C
+- The reader took a batch's triangle count from its padded byte size, adding a zero triangle for every odd count (and, with plane data, misreading everything after it). It now uses the stored count.
+- Re-exporting an imported RF mesh keeps every material in its place, used or not, so skins (which count materials) still line up. 14 stock meshes, all first-person weapons, lost unused slots before.
+- Import keeps reversed duplicate triangles (double-sided spots) by giving them their own vertices; Blender used to drop them. Exact duplicates are still left out.
+- Every stock mesh now round-trips with the same texture slots, flags, hitboxes and prop points; normals within 2°.
+
+RFA
+- Re-encoded (edited) animations wrote speeds into the position keys' in/out fields. Stock files hold the two inner Bezier points of the curve to the next key there (measured over all stock files); the exporter now writes points for a straight path between keys, as Blender shows it.
+- Edited animations keep the original header (ramp in/out, totals) and the face morph data of cutscene animations.
+
+Importing your mesh
+- DAE import rewritten: up axis and units applied (Y-up files no longer lie on their back), node transforms and skin bind poses, first UV set read with its real layout, `<polygons>` faces, n-gons kept, smooth faces with the file's normals, and textured materials (diffuse image or colour).
+- GLM import keeps the file's normals on smooth faces (it came in flat-shaded, which now exports as hard edges).
+- After Import Mesh, just the new mesh parts are selected, ready for the next step.
+- New Fit to RF Mesh: scales the selected parts together to the RF character's height and stands them on its spot.
+
+Other
+- Batch anims, picking an animation, Rest Pose and Delete Animation find the RF armature themselves instead of failing when it isn't selected.
+- Auto-Load's error no longer points to a removed Preferences page.
+
 ## v1.10.3
 
 - Fixed the Textures panel failing (Blender listing every icon name) when the picked texture had a warning: Blender has no 'WARNING' icon.

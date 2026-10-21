@@ -1,7 +1,7 @@
 bl_info = {
     "name": "RF Character Tools (V3C/V3M/RFA)",
     "author": "RF VFX Tools",
-    "version": (1, 10, 3),
+    "version": (1, 10, 4),
     "blender": (4, 0, 0),
     "location": "File > Import/Export, 3D View > Sidebar > RF Character",
     "description": "Import and export Red Faction character meshes, animations, and rigs",
@@ -222,7 +222,9 @@ def _unpack_data_block(db, chunk_infos, num_proppoints, num_verts, has_planes, h
         # so dividing by element size can overcount. Use ci_verts for reading,
         # byte sizes only for advancing the data block offset.
         num_verts_chunk = ci_verts
-        num_tris = ci_facesalloc // 8
+        # ci_faces is the triangle count; ci_facesalloc is padded to 16 bytes, so
+        # dividing it would read a zero triangle from the padding of odd counts
+        num_tris = ci_faces
         num_samepos = ci_samepos // 2
 
         positions = []
@@ -464,22 +466,45 @@ def _import_mesh(v3c, arm_obj, bone_names, lod_index=0, name_suffix=""):
     all_mat_indices = []
     vert_offset = 0
 
-    for ci, chunk in enumerate(chunks):
-        for p in chunk['positions']:
-            all_verts.append(rf_to_bl_pos(*p))
-        for n in chunk['normals']:
-            all_normals.append(rf_to_bl_pos(*n))
-        for u, v in chunk['uvs']:
+    def add_vertex(chunk, links, i):
+        all_verts.append(rf_to_bl_pos(*chunk['positions'][i]))
+        if i < len(chunk['normals']):
+            all_normals.append(rf_to_bl_pos(*chunk['normals'][i]))
+        if i < len(chunk['uvs']):
+            u, v = chunk['uvs'][i]
             all_uvs.append((u, 1.0 - v))  # flip V axis
-        for tri in chunk['triangles']:
-            # Flip winding: RF is LH (CW), Blender is RH (CCW) — swap indices 1↔2
-            all_faces.append((tri[0]+vert_offset, tri[2]+vert_offset, tri[1]+vert_offset))
-            all_mat_indices.append(chunk['texture_index'])
+        if i < len(links):
+            all_bone_links.append(links[i])
+
+    for ci, chunk in enumerate(chunks):
+        vert_offset = len(all_verts)
+        links = []
         for bl_w, bl_b in chunk['bone_links']:
             cj = tuple(b if b < num_bones else 0 for b in bl_b)
             cw = tuple(w if b < num_bones else 0 for w, b in zip(bl_w, bl_b))
-            all_bone_links.append((cw, cj))
-        vert_offset += len(chunk['positions'])
+            links.append((cw, cj))
+        for i in range(len(chunk['positions'])):
+            add_vertex(chunk, links, i)
+        # Blender can't hold two faces on the same three vertices. An exact repeat is
+        # dropped; a reversed repeat (a double-sided spot) gets its own vertices
+        seen = {}
+        for tri in chunk['triangles']:
+            idx = tuple(tri)
+            key = frozenset(idx)
+            prev = seen.get(key)
+            if prev is None or len(key) < 3:
+                seen.setdefault(key, idx)
+            elif idx in (prev, prev[1:] + prev[:1], prev[2:] + prev[:2]):
+                continue
+            else:
+                copies = []
+                for i in idx:
+                    copies.append(len(all_verts) - vert_offset)
+                    add_vertex(chunk, links, i)
+                idx = tuple(copies)
+            # Flip winding: RF is LH (CW), Blender is RH (CCW) — swap indices 1↔2
+            all_faces.append((idx[0]+vert_offset, idx[2]+vert_offset, idx[1]+vert_offset))
+            all_mat_indices.append(chunk['texture_index'])
 
     # Create mesh
     mesh_name = sm['name'] + name_suffix
@@ -1081,14 +1106,35 @@ def _export_rfa(arm_obj, action, filepath, bones_data):
     struct.pack_into("<I", header, 0, RFA_MAGIC)
     struct.pack_into("<I", header, 4, version)
 
-    # Restore bytes 8-27 from original if available (ramp, timing, etc.)
-    header_extra_b64 = action.get('rf_header_extra', '')
-    if header_extra_b64:
+    # Keep the imported file's header fields (reductions, morph counts, ramp in/out,
+    # total rotation/translation; times and bone count are set below) and its morph
+    # data, which sits after the bone data (cutscene faces)
+    original = None
+    if action.get('rf_original_rfa'):
         try:
-            extra = base64.b64decode(header_extra_b64)
-            header[8:8+len(extra)] = extra[:20]  # bytes 8-27
+            original = base64.b64decode(action['rf_original_rfa'])
         except Exception:
-            pass
+            original = None
+    morph = b''
+    morph_key_rel = 0
+    if original and len(original) >= 80:
+        header[8:72] = original[8:72]
+        nmv, nmk = struct.unpack_from("<2i", original, 28)
+        mvo, mko = struct.unpack_from("<2i", original, 72)
+        if (nmv or nmk) and 80 <= mvo <= mko <= len(original):
+            morph = original[mvo:]
+            morph_key_rel = mko - mvo
+        else:
+            struct.pack_into("<2i", header, 28, 0, 0)
+    else:
+        # Restore bytes 8-27 from original if available (ramp, timing, etc.)
+        header_extra_b64 = action.get('rf_header_extra', '')
+        if header_extra_b64:
+            try:
+                extra = base64.b64decode(header_extra_b64)
+                header[8:8+len(extra)] = extra[:20]  # bytes 8-27
+            except Exception:
+                pass
 
     # Compute time range
     all_times = []
@@ -1128,25 +1174,20 @@ def _export_rfa(arm_obj, action, filepath, bones_data):
             blob += struct.pack("<i4h", time_t, iqx, iqy, iqz, iqw)
             blob += b'\x00\x00\x00\x00'  # 4 bytes padding
 
-        # Position keys: 40 bytes each (time:4 + in_tan:12 + value:12 + out_tan:12)
+        # Position keys: 40 bytes each (time:4 + in:12 + value:12 + out:12).
+        # Stock files store 'in' and 'out' as the two inner Bezier points of the
+        # curve from this key to the next, as positions (measured over all 1,009
+        # stock RFAs). Points at 1/3 and 2/3 give the straight path between keys
+        # that Blender shows; the last key repeats its own value.
         pk_list = bd['pos_keys']
         for i, (time_t, pos) in enumerate(pk_list):
             x, y, z = pos
-            # Catmull-Rom tangent approximation
-            if len(pk_list) <= 1:
-                in_t = out_t = (0.0, 0.0, 0.0)
-            elif i == 0:
-                n = pk_list[1]
-                dt = max((n[0] - time_t) / RFA_TPS, 0.001)
-                in_t = out_t = tuple((n[1][j] - pos[j]) / dt for j in range(3))
-            elif i == len(pk_list) - 1:
-                p = pk_list[i - 1]
-                dt = max((time_t - p[0]) / RFA_TPS, 0.001)
-                in_t = out_t = tuple((pos[j] - p[1][j]) / dt for j in range(3))
+            if i + 1 < len(pk_list):
+                nxt = pk_list[i + 1][1]
+                in_t = tuple(pos[j] + (nxt[j] - pos[j]) / 3.0 for j in range(3))
+                out_t = tuple(pos[j] + (nxt[j] - pos[j]) * 2.0 / 3.0 for j in range(3))
             else:
-                p, n = pk_list[i - 1], pk_list[i + 1]
-                dt = max((n[0] - p[0]) / RFA_TPS, 0.001)
-                in_t = out_t = tuple((n[1][j] - p[1][j]) / dt for j in range(3))
+                in_t = out_t = tuple(pos)
 
             blob += struct.pack("<i", time_t)
             blob += struct.pack("<3f", *in_t)
@@ -1162,6 +1203,10 @@ def _export_rfa(arm_obj, action, filepath, bones_data):
         output += struct.pack("<I", off)
     for blob in bone_blobs:
         output += blob
+    if morph:
+        morph_ofs = len(output)
+        struct.pack_into("<2i", output, 72, morph_ofs, morph_ofs + morph_key_rel)
+        output += morph
 
     with open(filepath, 'wb') as f:
         f.write(output)
@@ -2706,11 +2751,17 @@ def _texture_slots(mesh_objs):
     slot_of = {}
     for obj in mesh_objs:
         mslots = obj.material_slots
-        for mi in _used_material_indices(obj.data):
+        used = _used_material_indices(obj.data)
+        # An imported RF mesh keeps every material in its own place, used or not:
+        # skins count materials by number
+        original = bool(obj.get('rf_original_mesh'))
+        if original:
+            used = sorted(set(used) | set(range(len(mslots))))
+        for mi in used:
             mat = mslots[mi].material if mi < len(mslots) else None
             name = _material_tex_name(mat)
             flags = _material_rf_flags(mat)
-            key = (name.lower(), flags)
+            key = (obj.name, mi) if original else (name.lower(), flags)
             si = key_to_slot.get(key)
             if si is None:
                 si = len(slots)
@@ -3527,9 +3578,9 @@ class RFCHAR_OT_ImportSelectedAnims(bpy.types.Operator):
 
     def execute(self, context):
         scn = context.scene
-        arm_obj = _get_armature(context)
+        arm_obj = _find_rf_armature(context)
         if not arm_obj:
-            self.report({'ERROR'}, "Select an armature or parented mesh")
+            self.report({'ERROR'}, "No RF armature found. Import a V3C first.")
             return {'CANCELLED'}
 
         rf_bones_json = arm_obj.get('rf_bones')
@@ -3637,9 +3688,9 @@ class RFCHAR_OT_SetActiveAction(bpy.types.Operator):
     action_name: StringProperty()
 
     def execute(self, context):
-        arm_obj = _get_armature(context)
+        arm_obj = _find_rf_armature(context)
         if not arm_obj:
-            self.report({'ERROR'}, "Select an armature")
+            self.report({'ERROR'}, "No RF armature found. Import a V3C first.")
             return {'CANCELLED'}
 
         action = bpy.data.actions.get(self.action_name)
@@ -3662,217 +3713,372 @@ class RFCHAR_OT_SetActiveAction(bpy.types.Operator):
 
 
 def _import_dae(filepath):
-    """Import a Collada .dae file (for Blender 5.0+ which removed built-in Collada support)."""
+    """Import a COLLADA .dae (Blender 5 has no built-in importer).
+
+    Each placed mesh becomes an object: node transforms (or a skin's bind shape),
+    units and up axis are applied to the vertices, so objects come in upright in
+    metres with no transform. UVs (first set), normals and textured materials
+    (diffuse image, else diffuse colour) come along. Returns the new objects."""
     import xml.etree.ElementTree as ET
+    from urllib.parse import unquote
 
-    tree = ET.parse(filepath)
-    root = tree.getroot()
+    root = ET.parse(filepath).getroot()
+    ns = root.tag.split('}')[0] + '}' if root.tag.startswith('{') else ''
+    dae_dir = os.path.dirname(filepath)
 
-    # Handle namespace
-    ns = ''
-    if root.tag.startswith('{'):
-        ns = root.tag.split('}')[0] + '}'
+    def q(tag):
+        return ns + tag
 
-    def find(elem, tag):
-        return elem.find(ns + tag)
+    def ref(url):
+        return (url or '').strip().lstrip('#')
 
-    def findall(elem, tag):
-        return elem.findall(ns + tag)
+    def floats(elem):
+        return [float(v) for v in (elem.text or '').split()] if elem is not None else []
 
-    def find_path(elem, path):
-        parts = path.split('/')
-        current = elem
-        for p in parts:
-            current = find(current, p)
-            if current is None:
-                return None
-        return current
+    by_id = {e.get('id'): e for e in root.iter() if e.get('id')}
 
-    # Check up axis
-    up_axis_elem = find(root, 'asset')
-    up_axis = 'Y_UP'
-    if up_axis_elem is not None:
-        ua = find(up_axis_elem, 'up_axis')
+    # COLLADA space -> Blender (Z up, metres)
+    up, meter = 'Y_UP', 1.0
+    asset = root.find(q('asset'))
+    if asset is not None:
+        ua = asset.find(q('up_axis'))
         if ua is not None and ua.text:
-            up_axis = ua.text.strip()
+            up = ua.text.strip()
+        un = asset.find(q('unit'))
+        if un is not None:
+            try:
+                meter = float(un.get('meter', '1') or 1.0)
+            except ValueError:
+                meter = 1.0
+    if up == 'Y_UP':
+        axis = Matrix(((1, 0, 0, 0), (0, 0, -1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
+    elif up == 'X_UP':
+        axis = Matrix(((0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 0), (0, 0, 0, 1)))
+    else:
+        axis = Matrix.Identity(4)
+    to_blender = axis @ Matrix.Scale(meter, 4)
 
-    def apply_up_axis(x, y, z):
-        if up_axis == 'Z_UP':
-            return (x, -z, y)
-        return (x, y, z)
+    def node_matrix(node):
+        m = Matrix.Identity(4)
+        for child in node:
+            tag = child.tag[len(ns):]
+            vals = floats(child)
+            if tag == 'matrix' and len(vals) == 16:
+                m = m @ Matrix((vals[0:4], vals[4:8], vals[8:12], vals[12:16]))
+            elif tag == 'translate' and len(vals) == 3:
+                m = m @ Matrix.Translation(vals)
+            elif tag == 'rotate' and len(vals) == 4:
+                m = m @ Matrix.Rotation(math.radians(vals[3]), 4, Vector(vals[:3]))
+            elif tag == 'scale' and len(vals) == 3:
+                m = m @ Matrix.Diagonal((vals[0], vals[1], vals[2], 1.0))
+        return m
 
-    # Parse sources (float arrays) by id
-    lib_geom = find(root, 'library_geometries')
-    if lib_geom is None:
-        raise ValueError("No geometry found in DAE file")
+    def bound_materials(inst):
+        out = {}
+        for im in inst.iter(q('instance_material')):
+            out[im.get('symbol')] = ref(im.get('target'))
+        return out
 
-    created_objects = []
+    # Placed meshes: (geometry, matrix, symbol -> material id, name); skinned ones
+    # get their matrix once every joint's place in the scene is known
+    instances = []
+    skinned = []
+    node_world = {}   # node sid / id / name -> world matrix
 
-    for geom in findall(lib_geom, 'geometry'):
-        geom_name = geom.get('name', geom.get('id', 'DAE_Mesh'))
-        mesh_elem = find(geom, 'mesh')
+    def walk(node, parent):
+        world = parent @ node_matrix(node)
+        for key in (node.get('sid'), node.get('id'), node.get('name')):
+            if key and key not in node_world:
+                node_world[key] = world
+        name = node.get('name') or node.get('id') or 'DAE_Mesh'
+        for child in node:
+            tag = child.tag[len(ns):]
+            if tag == 'instance_geometry':
+                geom = by_id.get(ref(child.get('url')))
+                if geom is not None:
+                    instances.append((geom, world, bound_materials(child), name))
+            elif tag == 'instance_controller':
+                ctrl = by_id.get(ref(child.get('url')))
+                skin = ctrl.find(q('skin')) if ctrl is not None else None
+                if skin is not None:
+                    geom = by_id.get(ref(skin.get('source')))
+                    if geom is not None:
+                        skinned.append((geom, skin, bound_materials(child), name))
+            elif tag == 'instance_node':
+                target = by_id.get(ref(child.get('url')))
+                if target is not None:
+                    walk(target, world)
+            elif tag == 'node':
+                walk(child, world)
+
+    scene = root.find(q('scene'))
+    ivs = scene.find(q('instance_visual_scene')) if scene is not None else None
+    vscene = by_id.get(ref(ivs.get('url'))) if ivs is not None else None
+    if vscene is None:
+        lib = root.find(q('library_visual_scenes'))
+        vscene = lib.find(q('visual_scene')) if lib is not None else None
+    if vscene is not None:
+        for node in vscene.findall(q('node')):
+            walk(node, Matrix.Identity(4))
+
+    def skin_matrix(skin):
+        """Where a skinned mesh sits in its bind pose: a joint's scene transform times
+        its inverse bind matrix, times the bind shape (the node holding the
+        controller doesn't move it)."""
+        bsm = floats(skin.find(q('bind_shape_matrix')))
+        bind_shape = Matrix((bsm[0:4], bsm[4:8], bsm[8:12], bsm[12:16])) if len(bsm) == 16 else Matrix.Identity(4)
+        joints = skin.find(q('joints'))
+        names, inv_bind = [], []
+        if joints is not None:
+            for inp in joints.findall(q('input')):
+                src = by_id.get(ref(inp.get('source')))
+                if src is None:
+                    continue
+                if inp.get('semantic') == 'JOINT':
+                    arr = src.find(q('Name_array'))
+                    if arr is None:
+                        arr = src.find(q('IDREF_array'))
+                    names = (arr.text or '').split() if arr is not None else []
+                elif inp.get('semantic') == 'INV_BIND_MATRIX':
+                    inv_bind = floats(src.find(q('float_array')))
+        for i, jname in enumerate(names):
+            jw = node_world.get(jname)
+            if jw is not None and len(inv_bind) >= 16 * (i + 1):
+                v = inv_bind[16 * i:16 * i + 16]
+                return jw @ Matrix((v[0:4], v[4:8], v[8:12], v[12:16])) @ bind_shape
+        return bind_shape
+
+    for geom, skin, symbols, name in skinned:
+        instances.append((geom, skin_matrix(skin), symbols, name))
+    if not instances:
+        lib = root.find(q('library_geometries'))
+        for geom in (lib.findall(q('geometry')) if lib is not None else []):
+            instances.append((geom, Matrix.Identity(4), {}, geom.get('name') or geom.get('id') or 'DAE_Mesh'))
+
+    # ── materials ──
+    def image_path(img_id):
+        img = by_id.get(img_id)
+        if img is None:
+            return None
+        init = img.find(q('init_from'))
+        if init is None:
+            return None
+        inner = init.find(q('ref'))  # COLLADA 1.5
+        text = (inner.text if inner is not None else init.text) or ''
+        text = unquote(text.strip())
+        for prefix in ('file:///', 'file://'):
+            if text.lower().startswith(prefix):
+                text = text[len(prefix):]
+        candidates = [text, os.path.join(dae_dir, text), os.path.join(dae_dir, os.path.basename(text))]
+        base = os.path.splitext(os.path.basename(text))[0]
+        for ext in ('.png', '.tga', '.jpg', '.jpeg', '.dds', '.bmp'):
+            candidates.append(os.path.join(dae_dir, base + ext))
+        for c in candidates:
+            if c and os.path.isfile(c):
+                return c
+        return text or None
+
+    def effect_texture(mat_id):
+        """(image path or None, diffuse colour or None) of a COLLADA material."""
+        mat = by_id.get(mat_id)
+        ie = mat.find(q('instance_effect')) if mat is not None else None
+        eff = by_id.get(ref(ie.get('url'))) if ie is not None else None
+        if eff is None:
+            return None, None
+        params = {p.get('sid'): p for p in eff.iter(q('newparam'))}
+        slot = None
+        for elem in eff.iter():
+            if elem.tag in (q('phong'), q('lambert'), q('blinn'), q('constant')):
+                slot = elem.find(q('diffuse'))
+                if slot is None:
+                    slot = elem.find(q('emission'))
+                break
+        if slot is None:
+            return None, None
+        colour = floats(slot.find(q('color'))) or None
+        tex = slot.find(q('texture'))
+        if tex is None:
+            return None, colour
+        img_id = tex.get('texture')
+        sampler = params.get(img_id)
+        if sampler is not None:
+            src = sampler.find('.//' + q('source'))
+            surface = params.get(src.text.strip()) if src is not None and src.text else None
+            init = surface.find('.//' + q('init_from')) if surface is not None else None
+            if init is not None and init.text:
+                img_id = init.text.strip()
+        return image_path(img_id), colour
+
+    made_materials = {}
+
+    def blender_material(mat_id, symbol):
+        key = mat_id or symbol or 'default'
+        if key in made_materials:
+            return made_materials[key]
+        elem = by_id.get(mat_id) if mat_id else None
+        name = (elem.get('name') if elem is not None else None) or mat_id or symbol or 'DAE_Material'
+        path, colour = effect_texture(mat_id) if mat_id else (None, None)
+        mat = bpy.data.materials.new(name)
+        mat.use_nodes = True
+        mat.use_backface_culling = False
+        bsdf = mat.node_tree.nodes.get('Principled BSDF')
+        if path:
+            tex = mat.node_tree.nodes.new('ShaderNodeTexImage')
+            tex.location = (-300, 300)
+            try:
+                tex.image = bpy.data.images.load(path, check_existing=True)
+            except Exception:
+                img = bpy.data.images.new(os.path.basename(path), 1, 1)
+                img.filepath = path
+                img.source = 'FILE'
+                tex.image = img
+            if bsdf:
+                mat.node_tree.links.new(tex.outputs['Color'], bsdf.inputs['Base Color'])
+        elif colour and bsdf:
+            bsdf.inputs['Base Color'].default_value = (colour + [1.0, 1.0, 1.0, 1.0])[:4]
+        made_materials[key] = mat
+        return mat
+
+    # ── geometry ──
+    def read_sources(mesh_elem):
+        sources = {}
+        for source in mesh_elem.findall(q('source')):
+            fa = source.find(q('float_array'))
+            if fa is None or not fa.text:
+                continue
+            stride = 3
+            acc = source.find('.//' + q('accessor'))
+            if acc is not None:
+                stride = int(acc.get('stride', '3') or 3)
+            sources[source.get('id', '')] = (floats(fa), stride)
+        return sources
+
+    created = []
+    for geom, matrix, symbols, obj_name in instances:
+        mesh_elem = geom.find(q('mesh'))
         if mesh_elem is None:
             continue
-
-        # Parse all sources
-        sources = {}
-        for source in findall(mesh_elem, 'source'):
-            sid = source.get('id', '')
-            fa = find(source, 'float_array')
-            if fa is not None and fa.text:
-                floats = [float(v) for v in fa.text.split()]
-                # Determine stride from accessor
-                tech = find(source, 'technique_common')
-                stride = 3
-                if tech is not None:
-                    acc = find(tech, 'accessor')
-                    if acc is not None:
-                        stride = int(acc.get('stride', '3'))
-                sources[sid] = (floats, stride)
-
-        # Parse vertices element (maps vertex semantic to position source)
-        vert_elem = find(mesh_elem, 'vertices')
-        vert_id = vert_elem.get('id', '') if vert_elem is not None else ''
-        vert_source_id = ''
+        sources = read_sources(mesh_elem)
+        vert_inputs = {}
+        vert_elem = mesh_elem.find(q('vertices'))
         if vert_elem is not None:
-            for inp in findall(vert_elem, 'input'):
-                if inp.get('semantic') == 'POSITION':
-                    vert_source_id = inp.get('source', '').lstrip('#')
+            for inp in vert_elem.findall(q('input')):
+                vert_inputs[inp.get('semantic')] = ref(inp.get('source'))
 
-        # Process triangles and polylist elements
-        all_verts = []
-        all_faces = []
-        all_uvs = []
-        all_normals = []
-
-        for prim_tag in ('triangles', 'polylist', 'polygons'):
-            for prim in findall(mesh_elem, prim_tag):
-                # Parse inputs
-                inputs = []
-                max_offset = 0
-                for inp in findall(prim, 'input'):
-                    semantic = inp.get('semantic', '')
-                    source_id = inp.get('source', '').lstrip('#')
-                    offset = int(inp.get('offset', '0'))
-                    # Resolve VERTEX reference
-                    if semantic == 'VERTEX':
-                        source_id = vert_source_id
-                        semantic = 'POSITION'
-                    inputs.append((semantic, source_id, offset))
-                    max_offset = max(max_offset, offset)
-                stride = max_offset + 1
-
-                # Parse index data
-                p_elem = find(prim, 'p')
-                if p_elem is None or not p_elem.text:
-                    continue
-                indices = [int(v) for v in p_elem.text.split()]
-
-                # Parse vcount for polylist
-                if prim_tag == 'polylist':
-                    vc_elem = find(prim, 'vcount')
-                    if vc_elem is not None and vc_elem.text:
-                        vcounts = [int(v) for v in vc_elem.text.split()]
-                    else:
+        verts, normals, uvs, faces, face_mats = [], [], [], [], []
+        mats = []
+        vert_map = {}
+        for prim in mesh_elem:
+            kind = prim.tag[len(ns):]
+            if kind not in ('triangles', 'polylist', 'polygons'):
+                continue
+            inputs = []
+            uv_set = None
+            for inp in prim.findall(q('input')):
+                sem, off = inp.get('semantic'), int(inp.get('offset', '0'))
+                src = ref(inp.get('source'))
+                if sem == 'TEXCOORD':
+                    s = int(inp.get('set', '0') or 0)
+                    if uv_set is not None and s >= uv_set:
                         continue
+                    uv_set = s
+                    inputs = [i for i in inputs if i[0] != 'TEXCOORD']
+                inputs.append((sem, src, off))
+            stride = max((off for _, _, off in inputs), default=0) + 1
+            pos = norm = uv = None
+            for sem, src, off in inputs:
+                if sem == 'VERTEX':
+                    pos = (sources.get(vert_inputs.get('POSITION')), off)
+                    if 'NORMAL' in vert_inputs and norm is None:
+                        norm = (sources.get(vert_inputs['NORMAL']), off)
+                    if 'TEXCOORD' in vert_inputs and uv is None:
+                        uv = (sources.get(vert_inputs['TEXCOORD']), off)
+                elif sem == 'NORMAL':
+                    norm = (sources.get(src), off)
+                elif sem == 'TEXCOORD':
+                    uv = (sources.get(src), off)
+            if pos is None or pos[0] is None:
+                continue
+
+            if kind == 'polygons':
+                polys = [[int(v) for v in (p.text or '').split()] for p in prim.findall(q('p'))]
+                polys += [[int(v) for v in (ph.find(q('p')).text or '').split()]
+                          for ph in prim.findall(q('ph')) if ph.find(q('p')) is not None]
+                counts = [len(p) // stride for p in polys]
+                indices = [i for p in polys for i in p]
+            else:
+                indices = [int(v) for v in ' '.join(p.text or '' for p in prim.findall(q('p'))).split()]
+                if kind == 'polylist':
+                    counts = [int(v) for v in (prim.find(q('vcount')).text or '').split()]
                 else:
-                    # Triangles: all faces have 3 verts
-                    nfaces = int(prim.get('count', '0'))
-                    vcounts = [3] * nfaces
+                    counts = [3] * (len(indices) // (3 * stride))
 
-                # Find source references
-                pos_source = norm_source = uv_source = None
-                pos_offset = norm_offset = uv_offset = 0
-                for sem, sid, off in inputs:
-                    if sem == 'POSITION' and sid in sources:
-                        pos_source, _ = sources[sid]
-                        pos_offset = off
-                    elif sem == 'NORMAL' and sid in sources:
-                        norm_source, _ = sources[sid]
-                        norm_offset = off
-                    elif sem == 'TEXCOORD' and sid in sources:
-                        uv_source, uv_stride = sources[sid]
-                        uv_offset = off
+            mat = blender_material(symbols.get(prim.get('material'), prim.get('material')), prim.get('material'))
+            if mat not in mats:
+                mats.append(mat)
+            mi = mats.index(mat)
 
-                if pos_source is None:
-                    continue
+            ptr = 0
+            for count in counts:
+                face = []
+                for _ in range(count):
+                    pi = indices[ptr + pos[1]]
+                    ni = indices[ptr + norm[1]] if norm and norm[0] else -1
+                    ti = indices[ptr + uv[1]] if uv and uv[0] else -1
+                    ptr += stride
+                    key = (pi, ni, ti)
+                    if key not in vert_map:
+                        vert_map[key] = len(verts)
+                        data, st = pos[0]
+                        verts.append(Vector(data[pi * st:pi * st + 3]))
+                        if ni >= 0:
+                            data, st = norm[0]
+                            normals.append(Vector(data[ni * st:ni * st + 3]))
+                        if ti >= 0:
+                            data, st = uv[0]
+                            uvs.append((data[ti * st], data[ti * st + 1]))
+                    face.append(vert_map[key])
+                if len(set(face)) >= 3:
+                    faces.append(face)
+                    face_mats.append(mi)
 
-                # Build mesh data
-                vert_map = {}
-                idx_ptr = 0
-
-                for vcount in vcounts:
-                    face_indices = []
-                    for vi in range(vcount):
-                        # Read indices for this vertex
-                        pi = indices[idx_ptr + pos_offset]
-                        ni = indices[idx_ptr + norm_offset] if norm_source else 0
-                        ti = indices[idx_ptr + uv_offset] if uv_source else 0
-                        idx_ptr += stride
-
-                        key = (pi, ni, ti)
-                        if key not in vert_map:
-                            local_idx = len(all_verts)
-                            vert_map[key] = local_idx
-
-                            px = pos_source[pi * 3]
-                            py = pos_source[pi * 3 + 1]
-                            pz = pos_source[pi * 3 + 2]
-                            all_verts.append(apply_up_axis(px, py, pz))
-
-                            if norm_source and ni * 3 + 2 < len(norm_source):
-                                nx = norm_source[ni * 3]
-                                ny = norm_source[ni * 3 + 1]
-                                nz = norm_source[ni * 3 + 2]
-                                all_normals.append(apply_up_axis(nx, ny, nz))
-
-                            if uv_source and ti * 2 + 1 < len(uv_source):
-                                all_uvs.append((uv_source[ti * 2], uv_source[ti * 2 + 1]))
-
-                        face_indices.append(vert_map[key])
-
-                    # Triangulate n-gons
-                    for fi in range(1, len(face_indices) - 1):
-                        all_faces.append((face_indices[0], face_indices[fi], face_indices[fi + 1]))
-
-        if not all_verts or not all_faces:
+        if not verts or not faces:
             continue
 
-        # Create Blender mesh
-        mesh = bpy.data.meshes.new(geom_name)
-        mesh.from_pydata(all_verts, [], all_faces)
-        mesh.validate(clean_customdata=False)
+        m = to_blender @ matrix
+        nm = m.to_3x3().inverted_safe().transposed()
+        mirrored = m.determinant() < 0
+        verts = [m @ v for v in verts]
+        if mirrored:
+            faces = [list(reversed(f)) for f in faces]
 
-        # UVs
-        if all_uvs and len(all_uvs) == len(all_verts):
+        mesh = bpy.data.meshes.new(obj_name)
+        mesh.from_pydata([tuple(v) for v in verts], [], faces)
+        for mat in mats:
+            mesh.materials.append(mat)
+        mesh.polygons.foreach_set('material_index', face_mats)
+        mesh.polygons.foreach_set('use_smooth', [True] * len(mesh.polygons))
+        if uvs and len(uvs) == len(verts):
             uv_layer = mesh.uv_layers.new(name="UVMap")
-            for li, loop in enumerate(mesh.loops):
-                vi = loop.vertex_index
-                if vi < len(all_uvs):
-                    uv_layer.data[li].uv = all_uvs[vi]
-
-        # Normals
-        if all_normals and len(all_normals) == len(all_verts):
+            uv_layer.data.foreach_set('uv', [c for l in mesh.loops for c in uvs[l.vertex_index]])
+        if normals and len(normals) == len(verts):
             try:
-                normals_list = [all_normals[l.vertex_index] if l.vertex_index < len(all_normals)
-                                else (0, 0, 1) for l in mesh.loops]
-                if hasattr(mesh, 'normals_split_custom_set'):
-                    mesh.normals_split_custom_set(normals_list)
+                if hasattr(mesh, 'use_auto_smooth'):
+                    mesh.use_auto_smooth = True
+                mesh.normals_split_custom_set(
+                    [tuple((nm @ normals[l.vertex_index]).normalized()) for l in mesh.loops])
             except Exception:
                 pass
-
+        mesh.validate(clean_customdata=False)
         mesh.update()
 
-        obj = bpy.data.objects.new(geom_name, mesh)
+        obj = bpy.data.objects.new(obj_name, mesh)
         bpy.context.collection.objects.link(obj)
-        bpy.context.view_layer.objects.active = obj
-        obj.select_set(True)
-        created_objects.append(obj)
+        created.append(obj)
 
-    if not created_objects:
+    if not created:
         raise ValueError("No mesh geometry found in DAE file")
-
-    return created_objects
+    return created
 
 
 def _import_glm(filepath):
@@ -4044,7 +4250,15 @@ def _import_glm(filepath):
                     u, v = uvs[vi]
                     uv_layer.data[li].uv = (u, 1.0 - v)
 
-        # Normals imported via from_pydata vertex data (Blender auto-calculates)
+        # The file's normals on smooth faces (otherwise every face would be flat,
+        # and export keeps flat faces as hard edges)
+        mesh.polygons.foreach_set('use_smooth', [True] * len(mesh.polygons))
+        try:
+            if hasattr(mesh, 'use_auto_smooth'):
+                mesh.use_auto_smooth = True
+            mesh.normals_split_custom_set([norms[l.vertex_index] for l in mesh.loops])
+        except Exception:
+            pass
 
         # Material: prefer skin file texture, then shader, then directory texture match
         shader = ''
@@ -4152,6 +4366,9 @@ class RFCHAR_OT_ImportCustomMesh(bpy.types.Operator, ImportHelper):
             self.report({'ERROR'}, "No file selected")
             return {'CANCELLED'}
         ext = os.path.splitext(filepath)[1].lower()
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        before = set(context.scene.objects)
 
         try:
             if ext == '.obj':
@@ -4188,7 +4405,64 @@ class RFCHAR_OT_ImportCustomMesh(bpy.types.Operator, ImportHelper):
             self.report({'ERROR'}, f"Import failed: {e}")
             return {'CANCELLED'}
 
-        self.report({'INFO'}, f"Imported '{os.path.basename(filepath)}'")
+        # Leave just the new mesh parts selected, ready for Fit and Copy Weights
+        new_meshes = sorted((o for o in context.scene.objects
+                             if o not in before and o.type == 'MESH'), key=lambda o: o.name)
+        if new_meshes:
+            _select_only(context, new_meshes, new_meshes[0])
+        self.report({'INFO'}, f"Imported '{os.path.basename(filepath)}': {len(new_meshes)} part"
+                              f"{'s' if len(new_meshes) != 1 else ''} selected. Line them up with the "
+                              "RF mesh (Fit to RF Mesh), then Copy Weights")
+        return {'FINISHED'}
+
+
+class RFCHAR_OT_FitToRFMesh(bpy.types.Operator):
+    bl_idname = "rfchar.fit_to_rf_mesh"
+    bl_label = "Fit to RF Mesh"
+    bl_description = ("Scale the selected parts together so they are as tall as the RF character, and "
+                      "stand them where it stands. Turning them to face the same way is up to you")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        import numpy as np
+        arm_obj = _find_rf_armature(context)
+        original = _rf_original_mesh(arm_obj)
+        if not original:
+            self.report({'ERROR'}, "The RF mesh isn't in the scene. Import the V3C first")
+            return {'CANCELLED'}
+        targets = _custom_mesh_targets(context)
+        if not targets:
+            self.report({'ERROR'}, "Select your mesh parts first")
+            return {'CANCELLED'}
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        def bounds(objs):
+            pts = []
+            for o in objs:
+                me = o.data
+                if not me.vertices:
+                    continue
+                co = np.empty(len(me.vertices) * 3, dtype=np.float64)
+                me.vertices.foreach_get('co', co)
+                m = np.array(o.matrix_world)
+                pts.append(co.reshape(-1, 3) @ m[:3, :3].T + m[:3, 3])
+            if not pts:
+                return None
+            allp = np.vstack(pts)
+            return Vector(allp.min(axis=0)), Vector(allp.max(axis=0))
+
+        rf, mine = bounds([original]), bounds(targets)
+        if not rf or not mine or mine[1].z - mine[0].z < 1e-6:
+            self.report({'ERROR'}, "Your mesh has no height to fit")
+            return {'CANCELLED'}
+        scale = (rf[1].z - rf[0].z) / (mine[1].z - mine[0].z)
+        foot = lambda b: Vector(((b[0].x + b[1].x) / 2, (b[0].y + b[1].y) / 2, b[0].z))
+        fit = Matrix.Translation(foot(rf)) @ Matrix.Scale(scale, 4) @ Matrix.Translation(-foot(mine))
+        # Parts whose parent is also selected follow their parent
+        for o in [o for o in targets if o.parent not in targets]:
+            o.matrix_world = fit @ o.matrix_world
+        self.report({'INFO'}, f"Scaled by {scale:.3f} and stood on the RF character's spot")
         return {'FINISHED'}
 
 
@@ -4636,7 +4910,7 @@ class RFCHAR_OT_RestPose(bpy.types.Operator):
     bl_description = "Clear animation and return to rest/bind pose"
 
     def execute(self, context):
-        arm_obj = _get_armature(context)
+        arm_obj = _find_rf_armature(context)
         if not arm_obj or not arm_obj.animation_data:
             return {'CANCELLED'}
         arm_obj.animation_data.action = None
@@ -4657,7 +4931,7 @@ class RFCHAR_OT_DeleteAnimation(bpy.types.Operator):
     action_name: StringProperty()
 
     def execute(self, context):
-        arm_obj = _get_armature(context)
+        arm_obj = _find_rf_armature(context)
         if not arm_obj or not arm_obj.animation_data:
             return {'CANCELLED'}
 
@@ -4702,7 +4976,7 @@ class RFCHAR_OT_DeleteAllAnimations(bpy.types.Operator):
         return context.window_manager.invoke_confirm(self, event)
 
     def execute(self, context):
-        arm_obj = _get_armature(context)
+        arm_obj = _find_rf_armature(context)
         if not arm_obj or not arm_obj.animation_data:
             return {'CANCELLED'}
 
@@ -5055,7 +5329,7 @@ class RFCHAR_OT_AutoLoadFromMaster(bpy.types.Operator):
 
         master_abs = _get_master_folder(context)
         if not master_abs:
-            self.report({'ERROR'}, "No master folder set. Open Edit > Preferences > Add-ons > RF Character Import")
+            self.report({'ERROR'}, "No master folder set. Set it in the Animations panel")
             return {'CANCELLED'}
         if not os.path.isdir(master_abs):
             self.report({'ERROR'}, f"Master folder doesn't exist: {master_abs}")
@@ -5885,7 +6159,8 @@ class RFCHAR_PT_WorkflowPanel(bpy.types.Panel):
         layout = self.layout
         col = layout.column(align=True)
         col.label(text="1. Import the RF character (V3C)")
-        col.label(text="2. Import your mesh, line it up with it")
+        col.label(text="2. Import your mesh, Fit to RF Mesh,")
+        col.label(text="    then line it up with the RF one")
         col.label(text="3. Copy Weights from RF Mesh,")
         col.label(text="    then fix spots in Weight Paint")
         col.label(text="4. Check textures: 7 at most,")
@@ -6939,8 +7214,9 @@ class RFCHAR_PT_MeshPanel(bpy.types.Panel):
         row = layout.row()
         row.scale_y = 1.2
         row.operator("rfchar.import_custom_mesh", text="Import Mesh", icon='FILE_FOLDER')
+        layout.operator("rfchar.fit_to_rf_mesh", icon='SNAP_ON')
         col = layout.column(align=True)
-        col.label(text="Move, rotate and scale it to sit")
+        col.label(text="Then move, rotate and scale it to sit")
         col.label(text="over the RF mesh. No need to apply.")
 
         parts = _bound_custom_meshes(context, arm_obj)
@@ -7439,6 +7715,7 @@ _classes = (
     RFCHAR_OT_ClearAnimList,
     RFCHAR_OT_SetActiveAction,
     RFCHAR_OT_ImportCustomMesh,
+    RFCHAR_OT_FitToRFMesh,
     RFCHAR_OT_BindToArmature,
     RFCHAR_OT_TransferWeights,
     RFCHAR_OT_ToggleRFMesh,
