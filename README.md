@@ -7,7 +7,7 @@ Blender add-on for importing and exporting Red Faction character meshes (V3C/V3M
 - **V3C/V3M Import:** Character meshes with armature, bone weights, materials, collision spheres, prop points, and LODs
 - **V3C Export:** Full mesh export with skeleton, weights, collision spheres, and prop points
 - **RFA Import/Export:** Batch import stock animations, preview in Blender, re-export with byte-exact round-trip
-- **Custom Mesh Workflow:** Bind external meshes to the RF armature, transfer weights from the original, validate weight coverage
+- **Custom Mesh Workflow:** Copy weights from the original onto meshes made of any number of parts, check weight coverage, export with up to 7 textures
 - **Animation Management:** Browse and switch animations, delete individually or in bulk
 - **Blender 4.0–5.0+** compatible (layered action API supported)
 
@@ -20,19 +20,28 @@ Blender add-on for importing and exporting Red Faction character meshes (V3C/V3M
 
 ## Workflow
 
-1. Import a V3C character mesh
-2. Find Textures to link materials
-3. Batch import animations (or load from the Required Animations list)
-4. Import a custom mesh, bind to armature, transfer weights
-5. Check Weights to verify full coverage
-6. Export V3C (and re-export animations if needed)
+The sidebar follows these steps:
+
+1. **Import the RF character.** Import V3C, then Find Textures to show the stock textures.
+2. **Your mesh.** Import Mesh, then move, rotate and scale it over the RF mesh. Transforms don't need applying; export writes the mesh where it sits in the scene.
+3. **Weights.** Select every part of your mesh and press Copy Weights from RF Mesh. It binds the parts to the RF armature, copies the RF character's weights from the nearest point of its surface, removes leftover rigs (for example from an FBX) and keeps the 4 strongest bones per vertex, as the game does. Check Weights selects any vertex left without weights; fix spots in Weight Paint, then press Limit to 4 Bones.
+4. **Textures.** The panel lists the texture slots the V3C will have, in order. RF allows 7 per character and names of up to 31 characters including `.tga`. Rename a texture by editing its name there.
+5. **Export.** Export V3C writes every visible part bound to the armature as one mesh, and saves each texture as an uncompressed `.tga` next to the V3C.
+
+Animations and the master animation folder are in the Animations panel. Bind with Auto Weights and Combine Textures are under Advanced.
+
+## Textures and skins
+
+- Each texture slot is one texture. Parts that use the same image share a slot.
+- Opaque textures are saved as 24-bit TGA and alpha textures (an image Alpha output connected in the material) as 32-bit TGA, resized to a power of two.
+- An entity skin (`$Skin` in entity.tbl, chosen by `$SkinName` in pc_multi.tbl) replaces a character's textures by slot number. A stock skin therefore puts the stock textures on a custom mesh. Copy Skin Line in the Textures panel copies a `$Skin` line that lists your textures in slot order; paste it under the character's entity and raise its `$Num Skins` by one.
 
 ## Custom Mesh Tips
 
-- Position your mesh to match the original character's proportions at the joints
-- After Transfer Weights, use Check Weights to find and fix any unweighted vertices
+- Line your mesh up with the RF character at the joints; Copy Weights takes each vertex's weights from the nearest point of the RF mesh
 - Weight paint problem areas (shoulders, hips, knees) for best results
-- The original RF mesh stays available for reference via the Mesh visibility toggle
+- The RF mesh, hitboxes, prop points and LODs can be shown and hidden in the Your Mesh panel
+- Hard edges and flat faces are exported as they look in Blender; Smooth all normals in the export options smooths every vertex instead
 
 ## Panel Location
 

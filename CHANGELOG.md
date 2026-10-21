@@ -1,5 +1,45 @@
 # Changelog
 
+## v1.10.0 — Custom Character Workflow
+
+Export
+- One texture slot per texture instead of one per batch. A part over 5,400 vertices no longer takes extra slots, and export stops with a message when a character needs more than RF's 7 slots.
+- Writes one material per slot, so skin order (entity.tbl `$Skin`) is the slot order shown in the Textures panel.
+- Exports every visible part bound to the RF armature as one mesh, not only the active object. "Selected parts only" exports just the selection.
+- Writes parts where they sit in the scene, including location and mirrored scale. The scene is no longer changed (transforms used to be applied to the object).
+- No longer exports the RF mesh when the armature is selected and a mesh of yours is in view but not bound; it says what to do instead.
+- Modifiers other than Armature (Mirror, Subdivision, ...) are written as they look in the viewport ("Apply modifiers", on by default).
+- Hard edges, flat faces and custom normals are kept. "Smooth all normals" restores the old smooth-everything output.
+- Alpha flag only on materials that use their texture's alpha. Blender 4.2+ marked every material as alpha, because new materials report Dithered/Hashed.
+- Material flags read from an imported V3C (such as 0x10 on stock visors) are kept on re-export.
+- Saves each texture slot as an uncompressed TGA next to the V3C: 24-bit, or 32-bit for alpha, resized to a power of two ("Save textures", on by default).
+- Texture names drop Blender's `.001` suffixes (`foo.png.001` → `foo.tga`); names over 31 characters or with non-ASCII characters stop the export.
+- Chunks are also split at 8,000 triangles (uint16 size field).
+
+Weights
+- Copy Weights from RF Mesh works on several selected parts at once, in the rest pose, and also when the RF mesh is hidden.
+- Binding keeps parts where they are, removes Armature modifiers and vertex groups left from other rigs ("Remove old rig"), and leaves one Armature modifier.
+- New Limit to 4 Bones: keeps the 4 strongest RF bones per vertex and normalizes, so the viewport matches the game. Copy Weights and Bind with Auto Weights do this by default.
+- Check Weights checks every part and selects the problem vertices on all of them.
+
+Animations
+- An imported RFA that was edited in Blender now exports the edits. The original file bytes are written only while the keys are unchanged. Animations imported before 1.10 keep the old behaviour; re-import them to edit them.
+
+Panel
+- The sidebar follows the steps: 1 Import, 2 Your Mesh (with show/hide), 3 Weights, 4 Textures, 5 Export. Animations and Advanced (Bind with Auto Weights, Combine Textures, Sync Texture Names) are separate, closed panels.
+- New Textures panel: the slots in order with editable names, size, alpha and problems; the RF mesh's own slots for reference; Copy Skin Line.
+- Validate checks the same parts, slots and limits as export.
+
+Import
+- RF meshes import with smooth faces, so their custom normals are stored more precisely and re-export with the stock vertex count.
+
+## v1.9.25
+
+- Texture names strip repeated image extensions (`foo.png.tga` → `foo.tga`).
+- Export option "Rename materials to texture names".
+- Validate warns about double extensions.
+- Batch Export V3Cs removed.
+
 ## v1.9.22 — Repo cleanup (Unreleased)
 
 - Addon folder renamed from `rf_character_import` to `rf_character_tools` to match the repo name and reflect that the addon does both import and export.

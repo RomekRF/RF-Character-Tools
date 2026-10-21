@@ -1,7 +1,7 @@
 bl_info = {
     "name": "RF Character Tools (V3C/V3M/RFA)",
     "author": "RF VFX Tools",
-    "version": (1, 9, 25),
+    "version": (1, 10, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export, 3D View > Sidebar > RF Character",
     "description": "Import and export Red Faction character meshes, animations, and rigs",
@@ -519,6 +519,8 @@ def _import_mesh(v3c, arm_obj, bone_names, lod_index=0, name_suffix=""):
 
             links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
             mat.use_backface_culling = False
+            # Keep the stock flags (e.g. 0x10 on visors) for re-export
+            mat['rf_mat_flags'] = mat_flag
 
             if has_alpha:
                 links.new(tex_node.outputs['Alpha'], bsdf.inputs['Alpha'])
@@ -550,6 +552,11 @@ def _import_mesh(v3c, arm_obj, bone_names, lod_index=0, name_suffix=""):
             normals_list = [tuple(all_normals[l.vertex_index]) if l.vertex_index < len(all_normals)
                             else (0, 0, 1) for l in mesh.loops]
             if hasattr(mesh, 'normals_split_custom_set'):
+                # Smooth faces: RF normals are per vertex, and Blender stores custom
+                # normals more precisely on smooth faces (4.0 also needs auto smooth)
+                mesh.polygons.foreach_set('use_smooth', [True] * len(mesh.polygons))
+                if hasattr(mesh, 'use_auto_smooth'):
+                    mesh.use_auto_smooth = True
                 mesh.normals_split_custom_set(normals_list)
         except Exception:
             pass  # Skip custom normals if it fails (known crash in some Blender versions)
@@ -885,6 +892,10 @@ def _import_rfa(rfa, arm_obj, bones_data, anim_name):
                     fc.keyframe_points[ki].co = (frame, value)
                     fc.keyframe_points[ki].interpolation = 'LINEAR'
 
+    # Fingerprint the fresh keys: export writes the stored original bytes only while
+    # the keys still match, so edits made in Blender are exported
+    action['rf_keys_hash'] = _action_keys_hash(action, arm_obj)
+
     # Set frame range
     start_frame = (rfa['start_time'] / RFA_TPS) * fps + 1
     end_frame = (rfa['end_time'] / RFA_TPS) * fps + 1
@@ -915,6 +926,20 @@ def _get_action_fcurves(action, arm_obj):
     if hasattr(action, 'fcurves'):
         return list(action.fcurves)
     return []
+
+
+def _action_keys_hash(action, arm_obj):
+    """Fingerprint of an action's keyframe positions, to tell an untouched imported
+    animation from an edited one."""
+    import hashlib
+    h = hashlib.sha1()
+    for fc in sorted(_get_action_fcurves(action, arm_obj), key=lambda f: (f.data_path, f.array_index)):
+        h.update(f"{fc.data_path}[{fc.array_index}]".encode('utf-8'))
+        n = len(fc.keyframe_points)
+        co = [0.0] * (2 * n)
+        fc.keyframe_points.foreach_get('co', co)
+        h.update(struct.pack(f"<{2 * n}f", *co))
+    return h.hexdigest()
 
 
 def _collect_bone_keyframes(fcurves, bone_name):
@@ -952,8 +977,13 @@ def _export_rfa(arm_obj, action, filepath, bones_data):
     If original RFA binary was stored during import, writes it directly
     for perfect byte-exact round-trip of unmodified animations.
     """
-    # Check for stored original RFA binary (perfect round-trip)
+    # Check for stored original RFA binary (perfect round-trip). Only while the keys
+    # are untouched; actions imported before 1.10 carry no fingerprint and keep the
+    # old behaviour (original bytes).
     original_b64 = action.get('rf_original_rfa', '')
+    stored_hash = action.get('rf_keys_hash')
+    if original_b64 and stored_hash is not None and stored_hash != _action_keys_hash(action, arm_obj):
+        original_b64 = ''
     if original_b64:
         try:
             original_data = base64.b64decode(original_b64)
@@ -2598,122 +2628,285 @@ def _pad16(buf):
     return buf
 
 
-def _gather_chunks(mesh_obj, bone_names):
-    """Split a Blender mesh into per-material chunks with RF-space data.
-    Returns list of dicts with positions, normals, uvs, triangles, bone_links."""
-    import bmesh
+# RF keeps 7 texture slots per LOD mesh (VifMesh::tex_ids[7] / tex_handles[7]) and
+# each batch's texture index picks one. An entity skin (entity.tbl $Skin) swaps
+# the textures by material number; this exporter writes one material per slot, so
+# skin order = slot order.
+RF_MAX_TEXTURE_SLOTS = 7
+# Texture names sit in 32-byte fields: 31 characters including '.tga'.
+RF_MAX_TEX_NAME_LEN = 31
+# Chunk byte sizes are uint16 fields: positions nv*12, triangles nt*8.
+MAX_CHUNK_VERTS = 5400
+MAX_CHUNK_TRIS = 8000
+# Corner normals closer than this (cos ~1.1°) count as one smooth vertex
+NORMAL_MERGE_DOT = 0.9998
+# Stock RF meshes carry 0x01 on every material; 0x08 marks alpha.
+RF_MAT_BASE = 0x01
+RF_MAT_ALPHA = 0x08
 
-    mesh = mesh_obj.data
-    num_bones = len(bone_names)
+
+def _material_uses_alpha(mat):
+    """True when the material cuts out or blends with its texture's alpha.
+    Blender 4.2+ gives every new material 'Dithered', so that alone means nothing."""
+    if not mat:
+        return False
+    if hasattr(mat, 'surface_render_method'):
+        if mat.surface_render_method == 'BLENDED':
+            return True
+    elif getattr(mat, 'blend_method', 'OPAQUE') in ('CLIP', 'HASHED', 'BLEND'):
+        return True
+    if mat.use_nodes and mat.node_tree:
+        for node in mat.node_tree.nodes:
+            if node.type == 'TEX_IMAGE' and node.outputs.get('Alpha') and node.outputs['Alpha'].is_linked:
+                return True
+    return False
+
+
+def _material_rf_flags(mat):
+    """V3D material flags. Flags read from an imported V3C (e.g. 0x10 on stock visors)
+    are kept; the alpha bit follows the material."""
+    flags = RF_MAT_BASE
+    if mat is not None and 'rf_mat_flags' in mat:
+        flags = int(mat['rf_mat_flags'])
+    if _material_uses_alpha(mat):
+        flags |= RF_MAT_ALPHA
+    return flags
+
+
+def _material_tex_name(mat):
+    """The texture name the V3C writes for a material: its Base Color image's name,
+    else the material's own name, always as '<name>.tga'."""
+    if not mat:
+        return 'default.tga'
+    img = _material_base_color_image(mat)
+    return _normalize_tex_name(img.name if img else mat.name)
+
+
+def _used_material_indices(mesh):
+    """Material indices that at least one face uses, ascending."""
+    if not mesh.polygons:
+        return []
+    attr = mesh.attributes.get('material_index')
+    if attr is None:
+        return [0]
+    vals = [0] * len(mesh.polygons)
+    attr.data.foreach_get('value', vals)
+    return sorted(set(vals))
+
+
+def _texture_slots(mesh_objs):
+    """The LOD texture slots an export of these meshes writes.
+
+    One slot per distinct texture (name, case-insensitive, plus material flags),
+    in the order the parts' material slots use them. Returns (slots, slot_of):
+    slots is a list of {'name', 'flags', 'image', 'materials'}; slot_of maps
+    (object name, material index) to a slot number."""
+    slots = []
+    key_to_slot = {}
+    slot_of = {}
+    for obj in mesh_objs:
+        mslots = obj.material_slots
+        for mi in _used_material_indices(obj.data):
+            mat = mslots[mi].material if mi < len(mslots) else None
+            name = _material_tex_name(mat)
+            flags = _material_rf_flags(mat)
+            key = (name.lower(), flags)
+            si = key_to_slot.get(key)
+            if si is None:
+                si = len(slots)
+                key_to_slot[key] = si
+                slots.append({'name': name, 'flags': flags,
+                              'image': _material_base_color_image(mat) if mat else None,
+                              'materials': []})
+            if mat and mat not in slots[si]['materials']:
+                slots[si]['materials'].append(mat)
+            slot_of[(obj.name, mi)] = si
+    return slots, slot_of
+
+
+def _slot_problem(slot):
+    """('ERROR' | 'WARNING', text) for one texture slot, or None."""
+    name = slot['name']
+    if len(name) > RF_MAX_TEX_NAME_LEN:
+        return 'ERROR', f"name is {len(name)} characters, RF allows {RF_MAX_TEX_NAME_LEN} with .tga"
+    if not name.isascii():
+        return 'ERROR', "name has non-ASCII characters"
+    img = slot['image']
+    if img is None:
+        return 'WARNING', "no image in Blender (Save Textures skips it)"
+    w, h = img.size[0], img.size[1]
+    if not w or not h:
+        return 'WARNING', "image not loaded (file missing?)"
+    if (w & (w - 1)) or (h & (h - 1)):
+        return 'WARNING', f"{w}x{h} is not a power of two (Save Textures resizes it)"
+    if ' ' in name:
+        return 'WARNING', "name has spaces"
+    return None
+
+
+def _texture_slot_errors(slots):
+    """Problems that stop an export."""
+    errors = []
+    if len(slots) > RF_MAX_TEXTURE_SLOTS:
+        errors.append(f"{len(slots)} textures, RF allows {RF_MAX_TEXTURE_SLOTS} per character. "
+                      "Give parts the same image, or combine textures (Advanced)")
+    for i, s in enumerate(slots):
+        p = _slot_problem(s)
+        if p and p[0] == 'ERROR':
+            errors.append(f"Texture {i} '{s['name']}': {p[1]}")
+    return errors
+
+
+def _corner_normals(mesh):
+    """Per-corner normals as Blender shades them (custom normals, sharp edges, flat faces)."""
+    n = len(mesh.loops)
+    flat = [0.0] * (n * 3)
+    if hasattr(mesh, 'corner_normals'):  # Blender 4.1+
+        mesh.corner_normals.foreach_get('vector', flat)
+    else:
+        mesh.calc_normals_split()
+        mesh.loops.foreach_get('normal', flat)
+    return [Vector(flat[i * 3:i * 3 + 3]) for i in range(n)]
+
+
+def _vertex_bone_links(obj, mesh, bone_idx):
+    """Per-vertex (weights, bones) bytes for RF: top 4 RF-bone influences, normalized
+    to 255. Vertices with no RF bone weight get no bones (0xFF) and weight 0."""
+    group_bone = {vg.index: bone_idx.get(vg.name, -1) for vg in obj.vertex_groups}
+    links = []
+    unweighted = 0
+    for v in mesh.vertices:
+        vg_weights = []
+        for g in v.groups:
+            bi = group_bone.get(g.group, -1)
+            if bi >= 0 and g.weight > 0.001:
+                vg_weights.append((bi, g.weight))
+        vg_weights.sort(key=lambda x: -x[1])
+        vg_weights = vg_weights[:4]
+
+        # Convert to 0-255 byte range, normalized to sum=255
+        # Redux normalizes: divide by sum, multiply by 255, adjust slot 0
+        byte_bones = [0xFF, 0xFF, 0xFF, 0xFF]  # 0xFF = unused (Redux/stock convention)
+        byte_weights = [0, 0, 0, 0]
+        if vg_weights:
+            w_sum = sum(w for _, w in vg_weights) or 1.0
+            for wi, (bi, w) in enumerate(vg_weights):
+                byte_bones[wi] = min(bi, 255)
+                byte_weights[wi] = max(1, min(255, int(round(w / w_sum * 255.0))))
+            # Adjust slot 0 so sum is exactly 255
+            bw_sum = sum(byte_weights)
+            if bw_sum > 0 and bw_sum != 255:
+                byte_weights[0] = max(1, min(255, byte_weights[0] + 255 - bw_sum))
+        else:
+            unweighted += 1
+        links.append((tuple(byte_weights), tuple(byte_bones)))
+    return links, unweighted
+
+
+def _gather_chunks(parts, bone_names, slot_of, num_slots, smooth_normals=False):
+    """Turn the exported parts into one RF chunk per texture slot.
+
+    parts: (obj, mesh, matrix) per part; mesh is the data to write and matrix maps
+    it into armature (RF model) space. Vertices split wherever UV or normal differ,
+    so UV seams and hard edges survive. Returns (chunks in slot order, empty slots
+    dropped, number of unweighted vertices)."""
     bone_idx = {name: i for i, name in enumerate(bone_names)}
+    chunks = [{'slot': si, 'positions': [], 'normals': [], 'uvs': [], 'triangles': [],
+               'bone_links': [], 'face_flags': []} for si in range(num_slots)]
+    vert_maps = [{} for _ in range(num_slots)]
+    unweighted = 0
 
-    # Use bmesh for safe triangulated access (avoids native crashes in Blender 5.0)
-    bm = bmesh.new()
-    bm.from_mesh(mesh)
-    bmesh.ops.triangulate(bm, faces=bm.faces[:])
-    bm.faces.ensure_lookup_table()
-    bm.verts.ensure_lookup_table()
+    for pi, (obj, mesh, matrix) in enumerate(parts):
+        mesh.calc_loop_triangles()
+        uv_layer = mesh.uv_layers.active
+        uv_data = uv_layer.data if uv_layer else None
+        corner_n = None if smooth_normals else _corner_normals(mesh)
+        nmat = matrix.to_3x3().inverted_safe().transposed()
+        mirrored = matrix.determinant() < 0
+        positions = [bl_to_rf_pos(matrix @ v.co) for v in mesh.vertices]
+        links, part_unweighted = _vertex_bone_links(obj, mesh, bone_idx)
+        unweighted += part_unweighted
 
-    uv_layer = bm.loops.layers.uv.active
+        # Per material index: texture slot and double-sided flag (backface culling off)
+        mslots = obj.material_slots
+        fallback = min((si for (oname, _), si in slot_of.items() if oname == obj.name), default=0)
+        mat_info = {}
 
-    # Group triangulated faces by material index
-    mat_tris = {}
-    for face in bm.faces:
-        mi = face.material_index
-        mat_tris.setdefault(mi, []).append(face)
-
-    chunks = []
-    for mi in sorted(mat_tris.keys()):
-        faces = mat_tris[mi]
-
-        # Check if material is double-sided (backface culling disabled)
-        face_flags = 0
-        if mi < len(mesh_obj.data.materials) and mesh_obj.data.materials[mi]:
-            mat = mesh_obj.data.materials[mi]
-            if hasattr(mat, 'use_backface_culling') and not mat.use_backface_culling:
-                face_flags = 0x20  # DOUBLE_SIDED
-
-        vert_map = {}
-        positions = []
-        normals = []
-        uvs = []
-        bone_links = []
-        triangles = []
-
-        for face in faces:
-            tri_indices = []
-            for loop in face.loops:
-                vi = loop.vert.index
-
-                # Position in RF space
-                rf_pos = bl_to_rf_pos(loop.vert.co)
-
-                # Normal in RF space
-                rf_norm = bl_to_rf_pos(loop.vert.normal)
-
-                # UV with V flip
-                if uv_layer:
-                    uv = loop[uv_layer].uv
+        for tri in mesh.loop_triangles:
+            mi = tri.material_index
+            info = mat_info.get(mi)
+            if info is None:
+                mat = mslots[mi].material if mi < len(mslots) else None
+                ds = 0x20 if (mat and not mat.use_backface_culling) else 0  # DOUBLE_SIDED
+                info = mat_info[mi] = (slot_of.get((obj.name, mi), fallback), ds)
+            si, face_flag = info
+            ch = chunks[si]
+            vmap = vert_maps[si]
+            idx = []
+            for li, vi in zip(tri.loops, tri.vertices):
+                n = corner_n[li] if corner_n is not None else mesh.vertices[vi].normal
+                n = (nmat @ n).normalized()
+                if uv_data:
+                    uv = uv_data[li].uv
                     rf_uv = (uv[0], 1.0 - uv[1])
                 else:
                     rf_uv = (0.0, 0.0)
+                # Corners of one vertex share an RF vertex when UVs match and normals
+                # are within ~1° (Blender stores custom normals with a little noise)
+                key = (pi, vi, round(rf_uv[0], 6), round(rf_uv[1], 6))
+                local = None
+                same = vmap.setdefault(key, [])
+                for other_n, other_local in same:
+                    if n.dot(other_n) > NORMAL_MERGE_DOT:
+                        local = other_local
+                        break
+                if local is None:
+                    local = len(ch['positions'])
+                    same.append((n, local))
+                    ch['positions'].append(positions[vi])
+                    ch['normals'].append(bl_to_rf_pos(n))
+                    ch['uvs'].append(rf_uv)
+                    ch['bone_links'].append(links[vi])
+                idx.append(local)
+            # Blender CCW → RF CW (swap 1↔2); a mirrored transform already flips it
+            a, b, c = idx
+            ch['triangles'].append((a, b, c) if mirrored else (a, c, b))
+            ch['face_flags'].append(face_flag)
 
-                key = (vi, round(rf_uv[0], 6), round(rf_uv[1], 6))
+    return [c for c in chunks if c['triangles']], unweighted
 
-                if key not in vert_map:
-                    local_idx = len(positions)
-                    vert_map[key] = local_idx
-                    positions.append(rf_pos)
-                    normals.append(rf_norm)
-                    uvs.append(rf_uv)
 
-                    # Bone weights from vertex groups (original mesh, not bmesh)
-                    vg_weights = []
-                    if vi < len(mesh.vertices):
-                        for g in mesh.vertices[vi].groups:
-                            if g.group >= len(mesh_obj.vertex_groups):
-                                continue
-                            grp = mesh_obj.vertex_groups[g.group]
-                            bi = bone_idx.get(grp.name, -1)
-                            if bi >= 0 and g.weight > 0.001:
-                                vg_weights.append((bi, g.weight))
+def _split_chunk(src):
+    """Split a chunk that exceeds the uint16 size fields into chunks on the same slot."""
+    out = []
 
-                    vg_weights.sort(key=lambda x: -x[1])
-                    vg_weights = vg_weights[:4]
+    def new():
+        return {'slot': src['slot'], 'positions': [], 'normals': [], 'uvs': [],
+                'triangles': [], 'bone_links': [], 'face_flags': []}
 
-                    # Convert to 0-255 byte range, normalized to sum=255
-                    # Redux normalizes: divide by sum, multiply by 255, adjust slot 0
-                    byte_bones = [0xFF, 0xFF, 0xFF, 0xFF]  # 0xFF = unused (Redux/stock convention)
-                    byte_weights = [0, 0, 0, 0]
-                    if vg_weights:
-                        w_sum = sum(w for _, w in vg_weights) or 1.0
-                        for wi, (bi, w) in enumerate(vg_weights):
-                            byte_bones[wi] = min(bi, 255)
-                            byte_weights[wi] = max(1, min(255, int(round(w / w_sum * 255.0))))
-                        # Adjust slot 0 so sum is exactly 255
-                        bw_sum = sum(byte_weights)
-                        if bw_sum > 0 and bw_sum != 255:
-                            byte_weights[0] = max(1, min(255, byte_weights[0] + 255 - bw_sum))
-
-                    bone_links.append((tuple(byte_weights), tuple(byte_bones)))
-
-                tri_indices.append(vert_map[key])
-
-            # Flip winding order: Blender CCW → RF CW (swap indices 1↔2)
-            triangles.append((tri_indices[0], tri_indices[2], tri_indices[1]))
-
-        chunks.append({
-            'material_index': mi,
-            'positions': positions,
-            'normals': normals,
-            'uvs': uvs,
-            'triangles': triangles,
-            'bone_links': bone_links,
-            'face_flags': face_flags,
-        })
-
-    bm.free()
-    return chunks
+    cur = new()
+    remap = {}
+    for tri, flag in zip(src['triangles'], src['face_flags']):
+        new_verts = sum(1 for i in tri if i not in remap)
+        if cur['triangles'] and (len(cur['positions']) + new_verts > MAX_CHUNK_VERTS
+                                 or len(cur['triangles']) >= MAX_CHUNK_TRIS):
+            out.append(cur)
+            cur = new()
+            remap = {}
+        new_tri = []
+        for i in tri:
+            if i not in remap:
+                remap[i] = len(cur['positions'])
+                cur['positions'].append(src['positions'][i])
+                cur['normals'].append(src['normals'][i])
+                cur['uvs'].append(src['uvs'][i])
+                cur['bone_links'].append(src['bone_links'][i])
+            new_tri.append(remap[i])
+        cur['triangles'].append(tuple(new_tri))
+        cur['face_flags'].append(flag)
+    if cur['triangles']:
+        out.append(cur)
+    return out
 
 
 def _build_data_block(chunks, is_character, prop_points=None):
@@ -2728,8 +2921,8 @@ def _build_data_block(chunks, is_character, prop_points=None):
     # ── Chunk headers (0x38 = 56 bytes each) ──
     for ci, chunk in enumerate(chunks):
         header = bytearray(0x38)
-        # Offset 0x20: texture index into tex_refs list (sequential, not Blender material slot)
-        struct.pack_into("<i", header, 0x20, ci)
+        # Offset 0x20: texture slot (index into the LOD texture list)
+        struct.pack_into("<i", header, 0x20, chunk['slot'])
         db += header
     db = bytearray(_pad16(db))
 
@@ -2756,8 +2949,7 @@ def _build_data_block(chunks, is_character, prop_points=None):
         db = bytearray(_pad16(db))
 
         # Triangles (3 indices + 1 flags uint16 = 8 bytes each)
-        face_flags = chunk.get('face_flags', 0)
-        for i0, i1, i2 in chunk['triangles']:
+        for (i0, i1, i2), face_flags in zip(chunk['triangles'], chunk['face_flags']):
             db += struct.pack("<4H", i0, i1, i2, face_flags)
         db = bytearray(_pad16(db))
 
@@ -2865,8 +3057,12 @@ def _gather_scene_prop_points(arm_obj, bone_names):
     return prop_points
 
 
-def _export_v3c(mesh_obj, arm_obj, filepath, bones_data, cspheres_data=None, prop_points_data=None):
-    """Export Blender mesh + armature as a V3C/V3M binary file."""
+def _export_v3c(parts, slots, slot_of, sm_name, arm_obj, filepath, bones_data,
+                cspheres_data=None, prop_points_data=None, smooth_normals=False):
+    """Export mesh parts + armature as a V3C/V3M binary file.
+
+    parts: (obj, mesh, matrix) per part (see _ExportParts); slots/slot_of from
+    _texture_slots. Returns (verts, tris, unweighted vertex count)."""
     is_character = bool(bones_data)
     bone_names = [b['name'] for b in bones_data] if bones_data else []
     if cspheres_data is None:
@@ -2874,50 +3070,18 @@ def _export_v3c(mesh_obj, arm_obj, filepath, bones_data, cspheres_data=None, pro
     if prop_points_data is None:
         prop_points_data = []
 
-    # Gather mesh chunks
-    chunks = _gather_chunks(mesh_obj, bone_names)
+    # Gather mesh chunks: one per texture slot
+    chunks, unweighted = _gather_chunks(parts, bone_names, slot_of, len(slots), smooth_normals)
     if not chunks:
         raise ValueError("No mesh data to export")
 
-    # Split chunks that exceed V3C limits
-    # Alloc fields are uint16, storing byte sizes (nv*12 for positions)
-    # Max verts per chunk: 65535 / 12 = 5461
-    MAX_CHUNK_VERTS = 5400  # conservative limit for uint16 alloc fields
+    # Split chunks that exceed the uint16 byte-size fields; the pieces keep their slot
     split_chunks = []
     for chunk in chunks:
-        if len(chunk['positions']) <= MAX_CHUNK_VERTS:
+        if len(chunk['positions']) <= MAX_CHUNK_VERTS and len(chunk['triangles']) <= MAX_CHUNK_TRIS:
             split_chunks.append(chunk)
         else:
-            # Split by iterating triangles and building sub-chunks
-            src = chunk
-            vert_remap = {}
-            cur = {'material_index': src['material_index'], 'positions': [], 'normals': [],
-                   'uvs': [], 'triangles': [], 'bone_links': [], 'face_flags': src.get('face_flags', 0)}
-
-            for tri in src['triangles']:
-                # Check if adding this triangle would overflow
-                new_verts = sum(1 for idx in tri if idx not in vert_remap)
-                if len(cur['positions']) + new_verts > MAX_CHUNK_VERTS and cur['triangles']:
-                    split_chunks.append(cur)
-                    vert_remap = {}
-                    cur = {'material_index': src['material_index'], 'positions': [], 'normals': [],
-                           'uvs': [], 'triangles': [], 'bone_links': [], 'face_flags': src.get('face_flags', 0)}
-
-                new_tri = []
-                for idx in tri:
-                    if idx not in vert_remap:
-                        new_idx = len(cur['positions'])
-                        vert_remap[idx] = new_idx
-                        cur['positions'].append(src['positions'][idx])
-                        cur['normals'].append(src['normals'][idx])
-                        cur['uvs'].append(src['uvs'][idx])
-                        if src['bone_links']:
-                            cur['bone_links'].append(src['bone_links'][idx])
-                    new_tri.append(vert_remap[idx])
-                cur['triangles'].append(tuple(new_tri))
-
-            if cur['triangles']:
-                split_chunks.append(cur)
+            split_chunks.extend(_split_chunk(chunk))
     chunks = split_chunks
 
     # Build data block
@@ -2928,58 +3092,10 @@ def _export_v3c(mesh_obj, arm_obj, filepath, bones_data, cspheres_data=None, pro
     total_tris = sum(len(c['triangles']) for c in chunks)
     num_chunks = len(chunks)
 
-    # Build material list from mesh materials
-    mesh = mesh_obj.data
-    materials = []
-    mat_flags = []
-    for mat in mesh.materials:
-        if mat:
-            # Get texture name — prefer the image connected to Base Color (if any)
-            tex_name = mat.name + '.tga'
-            img = None
-            if mat.use_nodes and mat.node_tree:
-                bsdf = mat.node_tree.nodes.get('Principled BSDF')
-                if bsdf and 'Base Color' in bsdf.inputs:
-                    for link in bsdf.inputs['Base Color'].links:
-                        if link.from_node.type == 'TEX_IMAGE' and link.from_node.image:
-                            img = link.from_node.image
-                            break
-                if not img:
-                    for node in mat.node_tree.nodes:
-                        if node.type == 'TEX_IMAGE' and node.image:
-                            img = node.image
-                            break
-            if img:
-                tex_name = _normalize_tex_name(img.name)
-            else:
-                # No image — fall back to the material name, also normalized
-                tex_name = _normalize_tex_name(mat.name)
-            materials.append(tex_name)
-            # Material flags: base = 0x01 (stock/Redux standard), alpha adds 0x08
-            flag = 0x01
-            if hasattr(mat, 'blend_method') and mat.blend_method in ('CLIP', 'HASHED', 'BLEND'):
-                flag |= 0x08
-            elif hasattr(mat, 'surface_render_method') and mat.surface_render_method == 'DITHERED':
-                flag |= 0x08
-            elif mat.use_nodes:
-                for node in mat.node_tree.nodes:
-                    if node.type == 'TEX_IMAGE' and node.outputs.get('Alpha'):
-                        if node.outputs['Alpha'].is_linked:
-                            flag |= 0x08
-                            break
-            mat_flags.append(flag)
-        else:
-            materials.append('default.tga')
-            mat_flags.append(0x01)
-
-    # Build texture reference list — one per chunk, material index as ID
-    tex_refs = []
-    for ci, chunk in enumerate(chunks):
-        mi = chunk['material_index']
-        if mi < len(materials):
-            tex_refs.append((mi, materials[mi]))
-        else:
-            tex_refs.append((0, 'default.tga'))
+    # One material per texture slot, so material number = slot number (what skins index)
+    materials = [s['name'] for s in slots]
+    mat_flags = [s['flags'] for s in slots]
+    tex_refs = [(si, s['name']) for si, s in enumerate(slots)]
 
     # ── Compute bounding box ──
     all_pos = []
@@ -3014,8 +3130,8 @@ def _export_v3c(mesh_obj, arm_obj, filepath, bones_data, cspheres_data=None, pro
     output += struct.pack("<I", 0)
 
     # Submesh header: name(24) + parent(24) + version(4) + num_lods(4)
-    sm_name = (mesh_obj.name[:23]).encode('ascii', errors='replace')
-    output += sm_name + b'\x00' * (24 - len(sm_name))
+    sm_name_b = (sm_name[:23]).encode('ascii', errors='replace')
+    output += sm_name_b + b'\x00' * (24 - len(sm_name_b))
     parent_name = b'\x00' * 24  # empty string (stock convention)
     output += parent_name
     output += struct.pack("<i", 7)  # submesh version
@@ -3071,7 +3187,7 @@ def _export_v3c(mesh_obj, arm_obj, filepath, bones_data, cspheres_data=None, pro
 
     # Unknown section after materials (Redux writes 1 entry: name + float)
     output += struct.pack("<i", 1)
-    sm_name_unk = (mesh_obj.name[:23]).encode('ascii', errors='replace')
+    sm_name_unk = (sm_name[:23]).encode('ascii', errors='replace')
     output += sm_name_unk + b'\x00' * (24 - len(sm_name_unk))
     output += struct.pack("<f", 0.0)
 
@@ -3107,7 +3223,7 @@ def _export_v3c(mesh_obj, arm_obj, filepath, bones_data, cspheres_data=None, pro
     with open(filepath, 'wb') as f:
         f.write(output)
 
-    return total_verts, total_tris
+    return total_verts, total_tris, unweighted
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -4076,64 +4192,168 @@ class RFCHAR_OT_ImportCustomMesh(bpy.types.Operator, ImportHelper):
         return {'FINISHED'}
 
 
+def _custom_mesh_targets(context):
+    """Meshes the weight tools work on: the selected meshes that aren't the
+    imported RF ones, or the active one."""
+    objs = [o for o in context.selected_objects
+            if o.type == 'MESH' and not o.get('rf_original_mesh')]
+    active = context.active_object
+    if not objs and active and active.type == 'MESH' and not active.get('rf_original_mesh'):
+        objs = [active]
+    return objs
+
+
+class _RestPose:
+    """Show the armature in its rest pose for the duration, so weights are copied
+    and computed against the bind shape rather than whatever pose is on screen."""
+
+    def __init__(self, arm_obj):
+        self.arm = arm_obj.data
+        self.prev = arm_obj.data.pose_position
+
+    def __enter__(self):
+        if self.prev != 'REST':
+            self.arm.pose_position = 'REST'
+            bpy.context.view_layer.update()
+        return self
+
+    def __exit__(self, *exc):
+        if self.prev != 'REST':
+            self.arm.pose_position = self.prev
+            bpy.context.view_layer.update()
+        return False
+
+
+def _bind_to_armature(obj, arm_obj, clean_old_rig=True):
+    """Parent obj to the RF armature without moving it and leave it exactly one
+    Armature modifier on that armature. With clean_old_rig, Armature modifiers for
+    other rigs and vertex groups that aren't RF bones are removed. Returns the
+    number of vertex groups removed."""
+    if obj.parent != arm_obj:
+        mw = obj.matrix_world.copy()
+        obj.parent = arm_obj
+        obj.parent_type = 'OBJECT'
+        obj.matrix_parent_inverse.identity()
+        obj.matrix_world = mw
+
+    keep = None
+    for m in [m for m in obj.modifiers if m.type == 'ARMATURE']:
+        if m.object == arm_obj and keep is None:
+            keep = m
+        elif m.object == arm_obj or clean_old_rig:
+            obj.modifiers.remove(m)
+    if keep is None:
+        keep = obj.modifiers.new(name='Armature', type='ARMATURE')
+        keep.object = arm_obj
+    keep.use_vertex_groups = True
+
+    removed = 0
+    if clean_old_rig:
+        bone_names = {b.name for b in arm_obj.data.bones}
+        for vg in list(obj.vertex_groups):
+            if vg.name not in bone_names:
+                obj.vertex_groups.remove(vg)
+                removed += 1
+    return removed
+
+
+def _clean_rf_weights(obj, bone_names, max_influences=4, min_weight=0.001):
+    """Make the viewport match the game: at most 4 RF-bone influences per vertex,
+    normalized to 1, near-zero weights dropped. Returns (vertices changed,
+    vertices with no RF bone weight). Object mode only."""
+    bone_groups = {vg.index: vg for vg in obj.vertex_groups if vg.name in bone_names}
+    changed = 0
+    empty = 0
+    for v in obj.data.vertices:
+        ws = sorted(((g.group, g.weight) for g in v.groups if g.group in bone_groups),
+                    key=lambda x: -x[1])
+        keep = [(gi, w) for gi, w in ws[:max_influences] if w > min_weight]
+        if not keep:
+            if ws and ws[0][1] > 0.0:
+                keep = [ws[0]]
+            else:
+                empty += 1
+                continue
+        total = sum(w for _, w in keep)
+        new = {gi: w / total for gi, w in keep}
+        old = dict(ws)
+        if len(old) == len(new) and all(abs(old[gi] - w) < 1e-4 for gi, w in new.items()):
+            continue
+        for gi in old:
+            if gi not in new:
+                bone_groups[gi].remove([v.index])
+        for gi, w in new.items():
+            bone_groups[gi].add([v.index], w, 'REPLACE')
+        changed += 1
+    return changed, empty
+
+
+def _select_only(context, objs, active):
+    for o in context.selected_objects:
+        o.select_set(False)
+    for o in objs:
+        o.select_set(True)
+    context.view_layer.objects.active = active
+
+
 class RFCHAR_OT_BindToArmature(bpy.types.Operator):
     bl_idname = "rfchar.bind_to_armature"
     bl_label = "Bind with Auto Weights"
     bl_description = (
-        "Parent your custom mesh to the RF armature using Blender's automatic bone heat weights. "
-        "Quick but approximate — best for meshes that don't closely match the original character shape, "
-        "or when the original RF mesh isn't available. May need weight painting cleanup afterward. "
-        "Select your custom mesh first."
+        "Parent the selected meshes to the RF armature using Blender's automatic bone heat weights. "
+        "Approximate, and it can fail on meshes made of separate pieces. Copy Weights from RF Mesh "
+        "is the better choice when your mesh lines up with the RF character"
     )
     bl_options = {'REGISTER', 'UNDO'}
+
+    clean_old_rig: BoolProperty(
+        name="Remove old rig",
+        description="Remove Armature modifiers for other rigs and vertex groups that aren't RF bones "
+                    "(e.g. left over from an FBX)",
+        default=True,
+    )
+    limit_weights: BoolProperty(
+        name="Limit to 4 bones",
+        description="Keep the 4 strongest RF bones per vertex and normalize, the way the game uses them",
+        default=True,
+    )
 
     def execute(self, context):
         arm_obj = _find_rf_armature(context)
         if not arm_obj:
             self.report({'ERROR'}, "No RF armature found. Import a V3C first.")
             return {'CANCELLED'}
-
-        # Find the custom mesh: active object if it's a mesh, otherwise any selected mesh
-        # that isn't the RF original
-        obj = None
-        if context.active_object and context.active_object.type == 'MESH':
-            obj = context.active_object
-        if not obj:
-            for o in context.selected_objects:
-                if o.type == 'MESH' and not o.get('rf_original_mesh'):
-                    obj = o
-                    break
-
-        if not obj:
-            self.report({'ERROR'}, "Select your custom mesh first")
+        targets = _custom_mesh_targets(context)
+        if not targets:
+            self.report({'ERROR'}, "Select your mesh first (the RF mesh itself can't be bound again)")
             return {'CANCELLED'}
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
 
-        if obj.get('rf_original_mesh'):
-            self.report({'WARNING'}, "That's the RF original mesh. Select your custom mesh instead.")
-            return {'CANCELLED'}
+        bone_names = {b.name for b in arm_obj.data.bones}
+        empty = 0
+        with _RestPose(arm_obj):
+            for t in targets:
+                # Start from a clean slate so parent_set adds exactly one modifier
+                if self.clean_old_rig:
+                    for m in [m for m in t.modifiers if m.type == 'ARMATURE']:
+                        t.modifiers.remove(m)
+                if t.parent:
+                    mw = t.matrix_world.copy()
+                    t.parent = None
+                    t.matrix_world = mw
+            _select_only(context, targets + [arm_obj], arm_obj)
+            bpy.ops.object.parent_set(type='ARMATURE_AUTO')
+            for t in targets:
+                _bind_to_armature(t, arm_obj, self.clean_old_rig)
+                if self.limit_weights:
+                    empty += _clean_rf_weights(t, bone_names)[1]
+        _select_only(context, targets, targets[-1])
 
-        if obj.parent == arm_obj and any(m.type == 'ARMATURE' for m in obj.modifiers):
-            self.report({'WARNING'}, f"'{obj.name}' is already bound to this armature")
-            return {'CANCELLED'}
-
-        # Clear existing parent if any
-        if obj.parent:
-            bpy.ops.object.select_all(action='DESELECT')
-            obj.select_set(True)
-            context.view_layer.objects.active = obj
-            bpy.ops.object.parent_clear(type='CLEAR_KEEP_TRANSFORM')
-
-        bpy.ops.object.select_all(action='DESELECT')
-        obj.select_set(True)
-        arm_obj.select_set(True)
-        context.view_layer.objects.active = arm_obj
-        bpy.ops.object.parent_set(type='ARMATURE_AUTO')
-
-        bpy.ops.object.select_all(action='DESELECT')
-        obj.select_set(True)
-        context.view_layer.objects.active = obj
-
-        self.report({'INFO'}, f"Bound '{obj.name}' to '{arm_obj.name}' with automatic weights")
+        names = ", ".join(t.name for t in targets[:3]) + ("..." if len(targets) > 3 else "")
+        self.report({'INFO'}, f"Bound {names} to '{arm_obj.name}' with automatic weights")
+        if empty:
+            self.report({'WARNING'}, f"{empty} vertices got no weight. Use Check Weights")
         return {'FINISHED'}
 
 
@@ -4141,57 +4361,84 @@ class RFCHAR_OT_TransferWeights(bpy.types.Operator):
     bl_idname = "rfchar.transfer_weights"
     bl_label = "Copy Weights from RF Mesh"
     bl_description = (
-        "Copy vertex weights from the original RF character mesh onto your custom mesh using "
-        "nearest-surface interpolation. More accurate than auto-weights and preserves RF's exact "
-        "bone weighting — best when your mesh overlaps the original character's shape. "
-        "Requires the original RF mesh to be in the scene (don't delete it after import)."
+        "Bind the selected meshes to the RF armature and copy the RF character's bone weights onto "
+        "them from the nearest point of its surface. Line your mesh up with the RF mesh first. "
+        "Works on several parts at once; the RF mesh must still be in the scene (it can be hidden)"
     )
     bl_options = {'REGISTER', 'UNDO'}
 
-    def execute(self, context):
-        target = context.active_object
-        if not target or target.type != 'MESH':
-            self.report({'ERROR'}, "Select your custom mesh first")
-            return {'CANCELLED'}
+    clean_old_rig: BoolProperty(
+        name="Remove old rig",
+        description="Remove Armature modifiers for other rigs and vertex groups that aren't RF bones "
+                    "(e.g. left over from an FBX)",
+        default=True,
+    )
+    limit_weights: BoolProperty(
+        name="Limit to 4 bones",
+        description="Keep the 4 strongest RF bones per vertex and normalize, the way the game uses them",
+        default=True,
+    )
 
+    def execute(self, context):
         arm_obj = _find_rf_armature(context)
         if not arm_obj:
             self.report({'ERROR'}, "No RF armature found")
             return {'CANCELLED'}
 
-        source = None
-        for c in arm_obj.children:
-            if c.type == 'MESH' and c != target and c.get('rf_original_mesh'):
-                source = c
-                break
-
+        source = _rf_original_mesh(arm_obj)
         if not source:
-            self.report({'ERROR'}, "No RF mesh found to transfer weights from")
+            self.report({'ERROR'}, "The RF mesh isn't in the scene. Re-import the V3C, "
+                                   "or use Bind with Auto Weights")
             return {'CANCELLED'}
 
-        if target.parent != arm_obj:
-            target.parent = arm_obj
-            mod = target.modifiers.get('Armature')
-            if not mod:
-                mod = target.modifiers.new(name='Armature', type='ARMATURE')
-            mod.object = arm_obj
+        targets = _custom_mesh_targets(context)
+        if not targets:
+            self.report({'ERROR'}, "Select your mesh first (the RF mesh itself can't be the target)")
+            return {'CANCELLED'}
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
 
-        for vg in source.vertex_groups:
-            if vg.name not in target.vertex_groups:
-                target.vertex_groups.new(name=vg.name)
+        bone_names = {b.name for b in arm_obj.data.bones}
+        # A source hidden in the viewport isn't evaluated, so the transfer would read nothing
+        source_hidden = source.hide_viewport
+        source.hide_viewport = False
+        removed_groups = 0
+        empty = 0
+        try:
+            with _RestPose(arm_obj):
+                for t in targets:
+                    removed_groups += _bind_to_armature(t, arm_obj, self.clean_old_rig)
+                    for vg in source.vertex_groups:
+                        if vg.name not in t.vertex_groups:
+                            t.vertex_groups.new(name=vg.name)
 
-        dt = target.modifiers.new(name='WeightTransfer', type='DATA_TRANSFER')
-        dt.object = source
-        dt.use_vert_data = True
-        dt.data_types_verts = {'VGROUP_WEIGHTS'}
-        dt.vert_mapping = 'POLYINTERP_NEAREST'
+                    dt = t.modifiers.new(name='RF_WeightTransfer', type='DATA_TRANSFER')
+                    dt.object = source
+                    dt.use_vert_data = True
+                    dt.data_types_verts = {'VGROUP_WEIGHTS'}
+                    dt.vert_mapping = 'POLYINTERP_NEAREST'
+                    dt.layers_vgroup_select_src = 'ALL'
+                    dt.layers_vgroup_select_dst = 'NAME'
+                    dt.mix_mode = 'REPLACE'
+                    dt.mix_factor = 1.0
 
-        bpy.ops.object.select_all(action='DESELECT')
-        target.select_set(True)
-        context.view_layer.objects.active = target
-        bpy.ops.object.modifier_apply(modifier='WeightTransfer')
+                    _select_only(context, [t], t)
+                    bpy.ops.object.modifier_move_to_index(modifier=dt.name, index=0)
+                    bpy.ops.object.modifier_apply(modifier=dt.name)
 
-        self.report({'INFO'}, f"Transferred weights from '{source.name}' to '{target.name}'")
+                    if self.limit_weights:
+                        empty += _clean_rf_weights(t, bone_names)[1]
+        finally:
+            source.hide_viewport = source_hidden
+        _select_only(context, targets, targets[-1])
+
+        names = ", ".join(t.name for t in targets[:3]) + ("..." if len(targets) > 3 else "")
+        msg = f"Copied RF weights onto {names}"
+        if removed_groups:
+            msg += f" (removed {removed_groups} old vertex groups)"
+        self.report({'INFO'}, msg)
+        if empty:
+            self.report({'WARNING'}, f"{empty} vertices got no weight. Use Check Weights")
         return {'FINISHED'}
 
 
@@ -4485,100 +4732,110 @@ class RFCHAR_OT_DeleteAllAnimations(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _weight_check_meshes(context, arm_obj):
+    """Meshes Check Weights looks at: the selected parts, else every visible part
+    bound to the armature, else the RF mesh."""
+    objs = _custom_mesh_targets(context)
+    if objs:
+        return objs
+    objs = [o for o in _bound_custom_meshes(context, arm_obj) if o.visible_get()]
+    if objs:
+        return objs
+    original = _rf_original_mesh(arm_obj)
+    return [original] if original and original.visible_get() else []
+
+
 class RFCHAR_OT_CheckWeights(bpy.types.Operator):
     bl_idname = "rfchar.check_weights"
     bl_label = "Check Weights"
-    bl_description = "Find vertices with no bone weights assigned. Selects them so you can fix them"
+    bl_description = ("Find vertices with no bone weights on your parts and select them in Edit Mode "
+                      "so you can fix them")
     bl_options = {'UNDO'}
 
     def execute(self, context):
-        arm_obj = _get_armature(context)
+        arm_obj = _find_rf_armature(context)
         if not arm_obj:
             self.report({'ERROR'}, "No RF armature found")
             return {'CANCELLED'}
 
-        # Find the mesh to check (active selection or first visible child)
-        mesh_obj = None
-        if context.active_object and context.active_object.type == 'MESH':
-            mesh_obj = context.active_object
-        else:
-            for c in arm_obj.children:
-                if c.type == 'MESH' and not c.hide_viewport and not c.get('rf_original_mesh'):
-                    mesh_obj = c
-                    break
-            if not mesh_obj:
-                for c in arm_obj.children:
-                    if c.type == 'MESH' and not c.hide_viewport:
-                        mesh_obj = c
-                        break
-
-        if not mesh_obj:
+        meshes = _weight_check_meshes(context, arm_obj)
+        if not meshes:
             self.report({'ERROR'}, "No visible mesh found")
             return {'CANCELLED'}
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
 
-        mesh = mesh_obj.data
         bone_names = {b.name for b in arm_obj.data.bones}
-        bone_groups = set()
-        for vg in mesh_obj.vertex_groups:
-            if vg.name in bone_names:
-                bone_groups.add(vg.index)
+        problems = {}
+        total_verts = 0
+        for mesh_obj in meshes:
+            mesh = mesh_obj.data
+            total_verts += len(mesh.vertices)
+            bone_groups = {vg.index for vg in mesh_obj.vertex_groups if vg.name in bone_names}
+            bad = [vi for vi, vert in enumerate(mesh.vertices)
+                   if sum(g.weight for g in vert.groups if g.group in bone_groups) < 0.001]
+            if bad:
+                problems[mesh_obj] = bad
 
-        # Check each vertex
-        unweighted = []
-        zero_weight = []
-        for vi, vert in enumerate(mesh.vertices):
-            bone_weight_sum = 0.0
-            for g in vert.groups:
-                if g.group in bone_groups:
-                    bone_weight_sum += g.weight
-            if bone_weight_sum < 0.001:
-                if any(g.group in bone_groups for g in vert.groups):
-                    zero_weight.append(vi)
-                else:
-                    unweighted.append(vi)
-
-        total_bad = len(unweighted) + len(zero_weight)
-
-        if total_bad == 0:
-            self.report({'INFO'}, f"All {len(mesh.vertices)} vertices have bone weights assigned")
+        if not problems:
+            self.report({'INFO'}, f"All {total_verts} vertices on {len(meshes)} part"
+                                  f"{'s' if len(meshes) != 1 else ''} have bone weights")
             return {'FINISHED'}
 
-        # Select the problem vertices
-        try:
-            bpy.ops.object.mode_set(mode='OBJECT')
-        except Exception:
-            pass
-        bpy.context.view_layer.objects.active = mesh_obj
-        mesh_obj.select_set(True)
-
-        # Deselect all verts first
-        for v in mesh.vertices:
-            v.select = False
-        for e in mesh.edges:
-            e.select = False
-        for f in mesh.polygons:
-            f.select = False
-
-        # Select problem verts
-        for vi in unweighted:
-            mesh.vertices[vi].select = True
-        for vi in zero_weight:
-            mesh.vertices[vi].select = True
-
-        mesh.update()
+        # Select the problem vertices and open Edit Mode on every part that has some
+        for mesh_obj, bad in problems.items():
+            mesh = mesh_obj.data
+            mesh.vertices.foreach_set('select', [False] * len(mesh.vertices))
+            mesh.edges.foreach_set('select', [False] * len(mesh.edges))
+            mesh.polygons.foreach_set('select', [False] * len(mesh.polygons))
+            for vi in bad:
+                mesh.vertices[vi].select = True
+            mesh.update()
+        objs = list(problems)
+        _select_only(context, objs, objs[0])
         try:
             bpy.ops.object.mode_set(mode='EDIT')
-            bpy.context.tool_settings.mesh_select_mode = (True, False, False)
+            context.tool_settings.mesh_select_mode = (True, False, False)
         except Exception:
             pass
 
-        parts = []
-        if unweighted:
-            parts.append(f"{len(unweighted)} unweighted")
-        if zero_weight:
-            parts.append(f"{len(zero_weight)} near-zero weight")
-        self.report({'WARNING'},
-            f"{total_bad} problem vertices selected on '{mesh_obj.name}': {', '.join(parts)}")
+        total_bad = sum(len(b) for b in problems.values())
+        parts = ", ".join(f"{o.name}: {len(b)}" for o, b in problems.items())
+        self.report({'WARNING'}, f"{total_bad} vertices without bone weights selected ({parts})")
+        return {'FINISHED'}
+
+
+class RFCHAR_OT_CleanWeights(bpy.types.Operator):
+    bl_idname = "rfchar.clean_weights"
+    bl_label = "Limit to 4 Bones"
+    bl_description = ("Keep the 4 strongest RF bones per vertex and normalize the rest, so the viewport "
+                      "shows what the game will. Run it after weight painting")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        arm_obj = _find_rf_armature(context)
+        if not arm_obj:
+            self.report({'ERROR'}, "No RF armature found")
+            return {'CANCELLED'}
+        meshes = _weight_check_meshes(context, arm_obj)
+        meshes = [m for m in meshes if not m.get('rf_original_mesh')]
+        if not meshes:
+            self.report({'ERROR'}, "Select your mesh first")
+            return {'CANCELLED'}
+        prev_mode = context.mode
+        if prev_mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        bone_names = {b.name for b in arm_obj.data.bones}
+        changed = empty = 0
+        for m in meshes:
+            c, e = _clean_rf_weights(m, bone_names)
+            changed += c
+            empty += e
+        if prev_mode == 'PAINT_WEIGHT':
+            bpy.ops.object.mode_set(mode='WEIGHT_PAINT')
+        self.report({'INFO'}, f"Cleaned {changed} vertices on {len(meshes)} part{'s' if len(meshes) != 1 else ''}")
+        if empty:
+            self.report({'WARNING'}, f"{empty} vertices have no bone weight. Use Check Weights")
         return {'FINISHED'}
 
 
@@ -5113,14 +5370,18 @@ _KNOWN_IMG_EXTS = ('.png', '.jpg', '.jpeg', '.dds', '.bmp', '.tif', '.tiff',
 
 def _normalize_tex_name(name):
     """Return '<base>.tga' for any image datablock name, iteratively stripping
-    every known image extension so 'foo.png.tga' becomes 'foo.tga' rather than
-    being passed through as-is. Empty input becomes 'default.tga'."""
+    every known image extension and Blender's '.001' duplicate suffix, so
+    'foo.png.tga' and 'foo.png.001' both become 'foo.tga'. Empty input becomes
+    'default.tga'."""
     if not name:
         return 'default.tga'
     base = name
     while True:
         low = base.lower()
         stripped = False
+        if len(base) > 4 and base[-4] == '.' and base[-3:].isdigit():
+            base = base[:-4]
+            continue
         for ext in _KNOWN_IMG_EXTS:
             if low.endswith(ext):
                 base = base[:-len(ext)]
@@ -5170,15 +5431,234 @@ def _sync_material_names_to_textures(mesh_obj):
     return renamed, conflicts
 
 
+def _rf_bones_data(arm_obj):
+    """The V3C bone records stored on an imported RF armature, or None."""
+    rf_bones_json = arm_obj.get('rf_bones') if arm_obj else None
+    if not rf_bones_json:
+        return None
+    bones_data = json.loads(rf_bones_json)
+    for b in bones_data:
+        b['inv_bind_quat'] = tuple(b['inv_bind_quat'])
+        b['inv_bind_pos'] = tuple(b['inv_bind_pos'])
+    return bones_data
+
+
+def _rf_original_mesh(arm_obj):
+    """The imported RF mesh (LOD 0) under this armature, or None."""
+    if not arm_obj:
+        return None
+    for c in arm_obj.children:
+        if c.type == 'MESH' and c.get('rf_original_mesh') and c.get('rf_lod_level', 0) == 0:
+            return c
+    return None
+
+
+def _bound_custom_meshes(context, arm_obj):
+    """Your meshes bound to this armature (parented to it, or with an Armature
+    modifier on it), sorted by name. Never the imported RF meshes."""
+    out = []
+    for o in context.scene.objects:
+        if o.type != 'MESH' or o.get('rf_original_mesh'):
+            continue
+        if o.parent == arm_obj or any(m.type == 'ARMATURE' and m.object == arm_obj
+                                      for m in o.modifiers):
+            out.append(o)
+    return sorted(out, key=lambda o: o.name)
+
+
+def _export_mesh_objects(context, arm_obj, selected_only=False):
+    """(meshes an export writes, note). Every visible bound part is merged into one
+    V3C. With none, the visible RF original is written (an edited stock mesh),
+    unless a mesh of yours is in view but not bound yet."""
+    bound = _bound_custom_meshes(context, arm_obj)
+    parts = [o for o in bound if o.visible_get()]
+    if selected_only:
+        parts = [o for o in parts if o.select_get()]
+    if parts:
+        return parts, ""
+    if selected_only:
+        return [], "None of the selected meshes is bound to the RF armature"
+    unbound = [o for o in context.view_layer.objects
+               if o.type == 'MESH' and not o.get('rf_original_mesh')
+               and o.visible_get() and o not in bound]
+    if unbound:
+        return [], (f"'{unbound[0].name}' isn't bound to the RF armature yet. "
+                    "Select it and run Copy Weights from RF Mesh first")
+    original = _rf_original_mesh(arm_obj)
+    if original and original.visible_get():
+        return [original], "No custom parts bound, so the RF mesh itself was written"
+    return [], "No visible mesh is bound to the RF armature"
+
+
+def _submesh_name(arm_obj, objs):
+    """Name written into the V3C submesh header."""
+    if len(objs) == 1:
+        return objs[0].name
+    original = _rf_original_mesh(arm_obj)
+    if original:
+        return original.name
+    source = arm_obj.get('rf_source_file', '')
+    return os.path.splitext(source)[0] if source else objs[0].name
+
+
+class _ExportParts:
+    """Context manager giving (obj, mesh, matrix) per part in armature space.
+
+    With apply_modifiers each part is its evaluated mesh, read with its Armature
+    modifiers switched off (the rest shape plus Mirror, Subdivision and so on).
+    Nothing in the scene changes: transforms are applied to the written vertices,
+    not to the objects."""
+
+    def __init__(self, context, arm_obj, objs, apply_modifiers=True):
+        self.context = context
+        self.arm_obj = arm_obj
+        self.objs = objs
+        self.apply_modifiers = apply_modifiers
+        self._muted = []
+        self._evaluated = []
+
+    def __enter__(self):
+        arm_inv = self.arm_obj.matrix_world.inverted_safe()
+        parts = []
+        if not self.apply_modifiers:
+            for o in self.objs:
+                parts.append((o, o.data, arm_inv @ o.matrix_world))
+            return parts
+        for o in self.objs:
+            for m in o.modifiers:
+                if m.type == 'ARMATURE' and m.show_viewport:
+                    m.show_viewport = False
+                    self._muted.append(m)
+        self.context.view_layer.update()
+        deps = self.context.evaluated_depsgraph_get()
+        for o in self.objs:
+            oe = o.evaluated_get(deps)
+            me = oe.to_mesh(preserve_all_data_layers=True, depsgraph=deps)
+            self._evaluated.append(oe)
+            parts.append((o, me, arm_inv @ o.matrix_world))
+        return parts
+
+    def __exit__(self, *exc):
+        for oe in self._evaluated:
+            try:
+                oe.to_mesh_clear()
+            except Exception:
+                pass
+        for m in self._muted:
+            m.show_viewport = True
+        if self._muted:
+            self.context.view_layer.update()
+        return False
+
+
+def _nearest_pow2(n):
+    return 1 << max(0, round(math.log2(max(n, 1))))
+
+
+def _save_slot_texture(slot, path, resize_pow2=True):
+    """Write a texture slot's image as an uncompressed TGA at path.
+    24-bit unless the slot uses alpha (RF alpha-tests every texture, so stray alpha
+    in an opaque texture would cut holes). Returns an error string or None."""
+    import numpy as np
+    img = slot['image']
+    if img is None:
+        return "no image"
+    try:
+        if img.source == 'FILE' and not img.has_data:
+            img.reload()
+    except Exception:
+        pass
+    w, h = img.size[0], img.size[1]
+    if not w or not h:
+        return "image not loaded (file missing?)"
+    ch = img.channels
+    buf = np.empty(w * h * ch, dtype=np.float32)
+    img.pixels.foreach_get(buf)
+    buf = buf.reshape(h, w, ch)
+    rgba = np.ones((h, w, 4), dtype=np.float32)
+    if ch >= 3:
+        rgba[..., :3] = buf[..., :3]
+    else:
+        rgba[..., :3] = buf[..., :1]
+    if ch in (2, 4):
+        rgba[..., 3] = buf[..., ch - 1]
+    if img.is_float:
+        # Float images are held in linear light; TGA wants sRGB
+        c = np.clip(rgba[..., :3], 0.0, 1.0)
+        rgba[..., :3] = np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(c, 1.0 / 2.4) - 0.055)
+    use_alpha = bool(slot['flags'] & RF_MAT_ALPHA)
+    out = bpy.data.images.new("__rf_texture_export", w, h, alpha=use_alpha)
+    try:
+        out.pixels.foreach_set(rgba.ravel())
+        if resize_pow2:
+            size = (_nearest_pow2(w), _nearest_pow2(h))
+            if size != (w, h):
+                out.scale(*size)
+        out.filepath_raw = path
+        out.file_format = 'TARGA_RAW'
+        out.save()
+    except Exception as e:
+        return str(e)
+    finally:
+        bpy.data.images.remove(out)
+    return None
+
+
+def _save_slot_textures(slots, folder, resize_pow2=True):
+    """Save every slot's image into folder under the name the V3C uses.
+    Returns (saved names, [(name, reason)] skipped)."""
+    saved, skipped = [], []
+    for s in slots:
+        err = _save_slot_texture(s, os.path.join(folder, s['name']), resize_pow2)
+        if err:
+            skipped.append((s['name'], err))
+        else:
+            saved.append(s['name'])
+    return saved, skipped
+
+
+def _skin_line(slots, skin_name):
+    """An entity.tbl $Skin line listing the slots' textures in slot order."""
+    names = " ".join(f'"{s["name"]}"' for s in slots)
+    return f'$Skin: "{skin_name}" ({names})'
+
+
 class RFCHAR_OT_ExportV3C(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.rf_v3c"
     bl_label = "Export RF Character Mesh (.v3c)"
-    bl_description = "Export the character mesh, skeleton, and collision spheres as a V3C file"
+    bl_description = ("Export every visible part bound to the RF armature as one V3C, "
+                      "with the skeleton, hitboxes, prop points and textures")
     bl_options = {'REGISTER'}
 
     filename_ext = ".v3c"
     filter_glob: StringProperty(default="*.v3c;*.v3m", options={'HIDDEN'})
 
+    selected_only: BoolProperty(
+        name="Selected parts only",
+        description="Export only the selected parts instead of every visible part bound to the armature",
+        default=False,
+    )
+    apply_modifiers: BoolProperty(
+        name="Apply modifiers",
+        description="Write Mirror, Subdivision and other modifiers as they look in the viewport. "
+                    "The Armature modifier is always left out",
+        default=True,
+    )
+    smooth_normals: BoolProperty(
+        name="Smooth all normals",
+        description="Ignore hard edges and flat faces and smooth every vertex (what version 1.9 did)",
+        default=False,
+    )
+    save_textures: BoolProperty(
+        name="Save textures next to the V3C",
+        description="Write each texture slot as an uncompressed .tga named the way the V3C refers to it",
+        default=True,
+    )
+    resize_pow2: BoolProperty(
+        name="Resize textures to power of two",
+        description="Scale saved textures to the nearest power-of-two size (64, 128, 256, ...)",
+        default=True,
+    )
     sync_material_names: BoolProperty(
         name="Rename materials to texture names",
         description="Rename each material to match its image texture's base filename "
@@ -5201,89 +5681,69 @@ class RFCHAR_OT_ExportV3C(bpy.types.Operator, ExportHelper):
             self.report({'ERROR'}, "No RF armature found")
             return {'CANCELLED'}
 
-        rf_bones_json = arm_obj.get('rf_bones')
-        if not rf_bones_json:
+        bones_data = _rf_bones_data(arm_obj)
+        if not bones_data:
             self.report({'ERROR'}, "No RF bone data on armature. Import a V3C first.")
             return {'CANCELLED'}
-        bones_data = json.loads(rf_bones_json)
-        for b in bones_data:
-            b['inv_bind_quat'] = tuple(b['inv_bind_quat'])
-            b['inv_bind_pos'] = tuple(b['inv_bind_pos'])
 
-        # Find the mesh to export (prefer active selection, then first child mesh)
-        mesh_obj = None
-        if context.active_object and context.active_object.type == 'MESH':
-            mesh_obj = context.active_object
-        else:
-            for c in arm_obj.children:
-                if c.type == 'MESH' and not c.hide_viewport:
-                    mesh_obj = c
-                    break
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
 
-        if not mesh_obj:
-            self.report({'ERROR'}, "No mesh found to export")
+        objs, note = _export_mesh_objects(context, arm_obj, self.selected_only)
+        if not objs:
+            self.report({'ERROR'}, note)
             return {'CANCELLED'}
-
-        # Check for unapplied transforms (common with FBX imports)
-        # Auto-apply rotation and scale so vertex data is in correct space
-        scl = mesh_obj.scale
-        has_scale = abs(scl.x - 1) > 0.001 or abs(scl.y - 1) > 0.001 or abs(scl.z - 1) > 0.001
-        has_rotation = False
-        if mesh_obj.rotation_mode == 'QUATERNION':
-            q = mesh_obj.rotation_quaternion
-            has_rotation = abs(q.w - 1) > 0.001 or abs(q.x) > 0.001 or abs(q.y) > 0.001 or abs(q.z) > 0.001
-        else:
-            rot = mesh_obj.rotation_euler
-            has_rotation = abs(rot.x) > 0.001 or abs(rot.y) > 0.001 or abs(rot.z) > 0.001
-        if has_rotation or has_scale:
-            # Ensure object mode for transform apply
-            prev_mode = context.mode
-            if prev_mode != 'OBJECT':
-                bpy.ops.object.mode_set(mode='OBJECT')
-            prev_active = context.view_layer.objects.active
-            prev_selected = [o for o in context.selected_objects]
-            bpy.ops.object.select_all(action='DESELECT')
-            mesh_obj.select_set(True)
-            context.view_layer.objects.active = mesh_obj
-            try:
-                bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
-                self.report({'WARNING'}, "Applied unapplied rotation/scale on mesh before export")
-            except Exception:
-                self.report({'WARNING'}, "Could not auto-apply transforms. Try Ctrl+A → Rotation & Scale manually.")
-            bpy.ops.object.select_all(action='DESELECT')
-            for o in prev_selected:
-                if o.name in context.view_layer.objects:
-                    o.select_set(True)
-            context.view_layer.objects.active = prev_active
-
-        # Gather collision spheres and prop points from live scene empties
-        bone_names = [b['name'] for b in bones_data]
-        cspheres = _gather_scene_cspheres(arm_obj, bone_names) if arm_obj else []
-        prop_points = _gather_scene_prop_points(arm_obj, bone_names) if arm_obj else []
 
         # Optionally rename materials to match their texture's base filename
         # (e.g. material 'Mat.001' with image 'RMK_RedWall01.tga' → material 'RMK_RedWall01').
-        # Runs before _export_v3c so the writer also sees the cleaned-up names.
         if self.sync_material_names:
-            try:
-                renamed, conflicts = _sync_material_names_to_textures(mesh_obj)
-                if renamed:
-                    self.report({'INFO'}, f"Renamed {len(renamed)} material(s) to match texture names")
-                for c in conflicts:
-                    self.report({'WARNING'}, f"Material rename skipped: {c}")
-            except Exception as e:
-                self.report({'WARNING'}, f"Material rename failed: {e}")
+            for mesh_obj in objs:
+                try:
+                    renamed, conflicts = _sync_material_names_to_textures(mesh_obj)
+                    for c in conflicts:
+                        self.report({'WARNING'}, f"Material rename skipped: {c}")
+                except Exception as e:
+                    self.report({'WARNING'}, f"Material rename failed: {e}")
+
+        slots, slot_of = _texture_slots(objs)
+        errors = _texture_slot_errors(slots)
+        if errors:
+            for e in errors:
+                self.report({'ERROR'}, e)
+            return {'CANCELLED'}
+
+        # Gather collision spheres and prop points from live scene empties
+        bone_names = [b['name'] for b in bones_data]
+        cspheres = _gather_scene_cspheres(arm_obj, bone_names)
+        prop_points = _gather_scene_prop_points(arm_obj, bone_names)
 
         try:
-            nv, nt = _export_v3c(mesh_obj, arm_obj, self.filepath, bones_data, cspheres, prop_points)
-            self.report({'INFO'},
-                f"Exported '{mesh_obj.name}': {nv} verts, {nt} tris, "
-                f"{len(bones_data)} bones, {len(cspheres)} hitboxes, {len(prop_points)} props")
+            with _ExportParts(context, arm_obj, objs, self.apply_modifiers) as parts:
+                nv, nt, unweighted = _export_v3c(
+                    parts, slots, slot_of, _submesh_name(arm_obj, objs), arm_obj,
+                    self.filepath, bones_data, cspheres, prop_points, self.smooth_normals)
         except Exception as e:
             self.report({'ERROR'}, f"Export failed: {e}")
             traceback.print_exc()
             return {'CANCELLED'}
 
+        tex_note = ""
+        if self.save_textures:
+            saved, skipped = _save_slot_textures(slots, os.path.dirname(os.path.abspath(self.filepath)),
+                                                 self.resize_pow2)
+            tex_note = f", {len(saved)} texture{'s' if len(saved) != 1 else ''} saved"
+            for name, why in skipped:
+                self.report({'WARNING'}, f"Texture '{name}' not saved: {why}")
+
+        if note:
+            self.report({'WARNING'}, note)
+        if unweighted:
+            self.report({'WARNING'},
+                f"{unweighted} vertices have no bone weights and will collapse in game. Use Check Weights")
+        parts_txt = f"{len(objs)} part{'s' if len(objs) != 1 else ''}"
+        self.report({'INFO'},
+            f"Exported {parts_txt}: {nv} verts, {nt} tris, {len(slots)} texture slot"
+            f"{'s' if len(slots) != 1 else ''}, {len(cspheres)} hitboxes, {len(prop_points)} props{tex_note}")
         return {'FINISHED'}
 
 
@@ -5332,7 +5792,7 @@ def _get_rf_actions(arm_obj):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class RFCHAR_PT_WorkflowPanel(bpy.types.Panel):
-    bl_label = "Workflow"
+    bl_label = "How It Works"
     bl_idname = "RFCHAR_PT_workflow"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -5343,11 +5803,13 @@ class RFCHAR_PT_WorkflowPanel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         col = layout.column(align=True)
-        col.label(text="1. Import a V3C character mesh")
-        col.label(text="2. Find Textures to link materials")
-        col.label(text="3. Batch import or add animations")
-        col.label(text="4. Edit animations in Blender")
-        col.label(text="5. Export RFA to use in-game")
+        col.label(text="1. Import the RF character (V3C)")
+        col.label(text="2. Import your mesh, line it up with it")
+        col.label(text="3. Copy Weights from RF Mesh,")
+        col.label(text="    then fix spots in Weight Paint")
+        col.label(text="4. Check textures: 7 at most,")
+        col.label(text="    names up to 31 characters")
+        col.label(text="5. Export V3C (saves the textures too)")
 
 
 class RFCHAR_OT_ImportRecent(bpy.types.Operator):
@@ -5397,121 +5859,55 @@ class RFCHAR_OT_ValidateExport(bpy.types.Operator):
         warnings = []
         info = []
 
-        # Bone data
-        rf_bones_json = arm_obj.get('rf_bones')
-        if not rf_bones_json:
+        bones_data = _rf_bones_data(arm_obj)
+        if not bones_data:
             issues.append("No RF bone data on armature (import a V3C first)")
+        rf_bone_names = {b['name'] for b in bones_data} if bones_data else set()
+
+        objs, note = _export_mesh_objects(context, arm_obj)
+        if not objs:
+            issues.append(note)
         else:
-            bones_data = json.loads(rf_bones_json)
-            info.append(f"{len(bones_data)} RF bones available")
-            # Check armature matches
-            arm_bone_names = {b.name for b in arm_obj.data.bones}
-            rf_bone_names = {b['name'] for b in bones_data}
-            missing_in_arm = rf_bone_names - arm_bone_names
-            extra_in_arm = arm_bone_names - rf_bone_names
-            if missing_in_arm:
-                warnings.append(f"{len(missing_in_arm)} RF bones missing from armature: {', '.join(list(missing_in_arm)[:3])}{'...' if len(missing_in_arm) > 3 else ''}")
-            if extra_in_arm:
-                warnings.append(f"{len(extra_in_arm)} extra bones on armature (will be ignored): {', '.join(list(extra_in_arm)[:3])}{'...' if len(extra_in_arm) > 3 else ''}")
+            if note:
+                warnings.append(note)
+            info.append("Parts: " + ", ".join(o.name for o in objs))
 
-        # Find mesh
-        mesh_obj = None
-        if context.active_object and context.active_object.type == 'MESH':
-            mesh_obj = context.active_object
-        else:
-            for c in arm_obj.children:
-                if c.type == 'MESH' and not c.hide_viewport:
-                    mesh_obj = c; break
+            slots, _ = _texture_slots(objs)
+            issues.extend(_texture_slot_errors(slots))
+            for i, s in enumerate(slots):
+                p = _slot_problem(s)
+                if p and p[0] == 'WARNING':
+                    warnings.append(f"Texture {i} '{s['name']}': {p[1]}")
+            info.append(f"{len(slots)}/{RF_MAX_TEXTURE_SLOTS} texture slots: "
+                        + ", ".join(s['name'] for s in slots))
 
-        if not mesh_obj:
-            issues.append("No mesh to export")
-        else:
-            mesh = mesh_obj.data
-            vcount = len(mesh.vertices)
-            fcount = len(mesh.polygons)
-            info.append(f"Mesh '{mesh_obj.name}': {vcount} verts, {fcount} faces")
-
-            # Check triangulation
-            non_tri = sum(1 for p in mesh.polygons if len(p.vertices) != 3)
-            if non_tri:
-                warnings.append(f"{non_tri} non-triangle faces (will be triangulated on export)")
-
-            # Check weights
-            if rf_bones_json:
-                rf_bone_names = {b['name'] for b in bones_data}
-                over_weighted = 0
-                unweighted = 0
-                wrong_bone = 0
+            unweighted = over_weighted = wrong_bone = flat = 0
+            for mesh_obj in objs:
+                mesh = mesh_obj.data
+                names = [vg.name for vg in mesh_obj.vertex_groups]
                 for v in mesh.vertices:
-                    valid = [g for g in v.groups if mesh_obj.vertex_groups[g.group].name in rf_bone_names and g.weight > 0.001]
-                    if len(valid) > 4:
-                        over_weighted += 1
+                    valid = [g for g in v.groups if g.group < len(names)
+                             and names[g.group] in rf_bone_names and g.weight > 0.001]
                     if not valid:
                         unweighted += 1
-                    invalid = [g for g in v.groups if mesh_obj.vertex_groups[g.group].name not in rf_bone_names and g.weight > 0.001]
-                    if invalid:
+                    elif len(valid) > 4:
+                        over_weighted += 1
+                    if any(g.group < len(names) and names[g.group] not in rf_bone_names
+                           and g.weight > 0.001 for g in v.groups):
                         wrong_bone += 1
-                if unweighted:
-                    issues.append(f"{unweighted} vertices with no weights (will fail to bind)")
-                if over_weighted:
-                    warnings.append(f"{over_weighted} vertices with >4 bone influences (excess will be dropped)")
-                if wrong_bone:
-                    warnings.append(f"{wrong_bone} vertices weighted to non-RF bones (will be dropped)")
-
-            # Check materials
-            if not mesh.materials:
-                warnings.append("Mesh has no materials")
-            else:
-                no_tex = 0
-                wrong_ext = []
-                name_mismatch = []
-                for m in mesh.materials:
-                    if not m: no_tex += 1; continue
-                    img = None
-                    if m.use_nodes and m.node_tree:
-                        bsdf = m.node_tree.nodes.get('Principled BSDF')
-                        if bsdf and 'Base Color' in bsdf.inputs:
-                            for link in bsdf.inputs['Base Color'].links:
-                                if link.from_node.type == 'TEX_IMAGE' and link.from_node.image:
-                                    img = link.from_node.image
-                                    break
-                        if not img:
-                            for n in m.node_tree.nodes:
-                                if n.type == 'TEX_IMAGE' and n.image:
-                                    img = n.image; break
-                    if not img:
-                        no_tex += 1
-                        continue
-                    # Check extension
-                    if not img.name.lower().endswith('.tga'):
-                        wrong_ext.append(img.name)
-                    # Double-extension check — 'foo.png.tga' is the classic
-                    # crash trigger; if this fires, exporting now (v1.9.25+)
-                    # will clean it, but we still surface it as a warning.
-                    low = img.name.lower()
-                    inner_exts = ('.png.', '.jpg.', '.jpeg.', '.dds.', '.bmp.',
-                                  '.tif.', '.tiff.', '.exr.', '.psd.', '.gif.')
-                    if low.endswith('.tga') and any(e in low for e in inner_exts):
-                        if img.name not in wrong_ext:
-                            wrong_ext.append(f"{img.name} (double-ext)")
-                    # Check material name matches image base
-                    img_base = os.path.splitext(img.name)[0]
-                    if m.name != img_base:
-                        name_mismatch.append(f"{m.name}→{img_base}")
-                if no_tex:
-                    warnings.append(f"{no_tex}/{len(mesh.materials)} materials have no texture")
-                if wrong_ext:
-                    preview = ', '.join(wrong_ext[:3]) + ('...' if len(wrong_ext) > 3 else '')
-                    warnings.append(f"{len(wrong_ext)} image(s) not .tga: {preview} (use Sync Texture Names)")
-                if name_mismatch:
-                    preview = ', '.join(name_mismatch[:3]) + ('...' if len(name_mismatch) > 3 else '')
-                    info.append(f"{len(name_mismatch)} material/image name mismatch: {preview}")
-
-            # Chunk size warning
-            if vcount > 5400 and vcount <= 5461:
-                warnings.append(f"Vertex count {vcount} is near the 5,461 per-chunk limit")
-            if vcount > 5461:
-                info.append(f"Will be split into {(vcount // 5400) + 1} chunks on export")
+                if not getattr(mesh, 'has_custom_normals', False):
+                    flat += sum(1 for p in mesh.polygons if not p.use_smooth)
+            if unweighted:
+                issues.append(f"{unweighted} vertices with no bone weights (they collapse in game). "
+                              "Use Check Weights")
+            if over_weighted:
+                warnings.append(f"{over_weighted} vertices with more than 4 bones; export keeps the "
+                                "strongest 4 (Limit to 4 Bones shows the result)")
+            if wrong_bone:
+                info.append(f"{wrong_bone} vertices also weighted to non-RF groups (ignored)")
+            if flat:
+                info.append(f"{flat} flat-shaded faces will look faceted in game "
+                            "(Shade Smooth, or Smooth all normals on export)")
 
         # Report
         lines = []
@@ -5530,11 +5926,10 @@ class RFCHAR_OT_ValidateExport(bpy.types.Operator):
             for line in lines:
                 self.report({'WARNING'} if warnings and not issues else ({'ERROR'} if issues else {'INFO'}), line)
             self.report({'INFO'}, f"Validation: {len(issues)} errors, {len(warnings)} warnings. See System Console for details.")
-            # Also print to console
-            print("\n=== RF Character Export Validation ===")
-            for line in lines:
-                print(line)
-            print("======================================")
+        print("\n=== RF Character Export Validation ===")
+        for line in lines:
+            print(line)
+        print("======================================")
 
         return {'FINISHED'} if not issues else {'CANCELLED'}
 
@@ -6076,6 +6471,41 @@ class RFCHAR_OT_FixTextureNames(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class RFCHAR_OT_CopySkinLine(bpy.types.Operator):
+    bl_idname = "rfchar.copy_skin_line"
+    bl_label = "Copy Skin Line"
+    bl_description = (
+        "Copy an entity.tbl $Skin line listing your textures in slot order. A skin replaces a "
+        "character's textures by slot number, so a stock skin would put stock textures on your mesh. "
+        "Paste the line under the character's entity, raise its $Num Skins by one and use the skin "
+        "name as $SkinName in pc_multi.tbl"
+    )
+
+    skin_name: StringProperty(name="Skin name", default="custom")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        arm_obj = _find_rf_armature(context)
+        if not arm_obj:
+            self.report({'ERROR'}, "No RF armature found")
+            return {'CANCELLED'}
+        objs, note = _export_mesh_objects(context, arm_obj)
+        if not objs:
+            self.report({'ERROR'}, note)
+            return {'CANCELLED'}
+        slots, _ = _texture_slots(objs)
+        line = _skin_line(slots, self.skin_name)
+        context.window_manager.clipboard = line
+        self.report({'INFO'}, f"Copied: {line}")
+        return {'FINISHED'}
+
+
+def _rf_panel_poll(context):
+    return _find_rf_armature(context) is not None
+
+
 class RFCHAR_PT_MainPanel(bpy.types.Panel):
     bl_label = "RF Character"
     bl_idname = "RFCHAR_PT_main"
@@ -6093,15 +6523,9 @@ class RFCHAR_PT_MainPanel(bpy.types.Panel):
         if arm_obj:
             box = layout.box()
             col = box.column(align=True)
-            col.label(text=arm_obj.name, icon='ARMATURE_DATA')
-            mesh_children = [c for c in arm_obj.children if c.type == 'MESH' and not c.hide_viewport]
-            info = f"{len(arm_obj.data.bones)} bones"
-            if mesh_children:
-                names = ', '.join(c.name for c in mesh_children[:3])
-                info += f"  ·  {names}"
-            col.label(text=info)
+            col.label(text=arm_obj.get('rf_source_file', arm_obj.name), icon='ARMATURE_DATA')
+            extras = [f"{len(arm_obj.data.bones)} bones"]
             rf_actions = _get_rf_actions(arm_obj)
-            extras = []
             if rf_actions:
                 extras.append(f"{len(rf_actions)} anims")
             pp_count = len([c for c in arm_obj.children if c.type == 'EMPTY' and c.get('rf_prop_point')])
@@ -6110,23 +6534,209 @@ class RFCHAR_PT_MainPanel(bpy.types.Panel):
                 extras.append(f"{pp_count} props")
             if cs_count:
                 extras.append(f"{cs_count} hitboxes")
-            if extras:
-                col.label(text="  ·  ".join(extras))
+            col.label(text="  ·  ".join(extras))
 
-        # ── Import ──
-        layout.separator()
+        # ── Step 1: the RF character ──
+        layout.label(text="1. Import the RF character", icon='IMPORT')
         row = layout.row(align=True)
-        row.operator("import_scene.rf_v3c", text="V3C", icon='IMPORT')
-        row.operator("import_scene.rf_rfa", text="RFA", icon='ACTION')
+        row.scale_y = 1.2
+        row.operator("import_scene.rf_v3c", text="Import V3C", icon='IMPORT')
+        row.operator("rfchar.find_textures", text="Find Textures", icon='VIEWZOOM')
+
+        recent = list(scn.get('rf_recent_v3c', []))
+        if recent:
+            box = layout.box()
+            row = box.row()
+            row.label(text="Recent", icon='FILE_REFRESH')
+            row.operator("rfchar.clear_recent", text="", icon='X', emboss=False)
+            col = box.column(align=True)
+            for fp in recent[:5]:
+                op = col.operator("rfchar.import_recent", text=os.path.basename(fp), icon='FILE')
+                op.filepath = fp
+
+        if not arm_obj:
+            layout.label(text="Start with the stock character", icon='INFO')
+            layout.label(text="your mesh will replace")
+
+
+class RFCHAR_PT_MeshPanel(bpy.types.Panel):
+    bl_label = "2. Your Mesh"
+    bl_idname = "RFCHAR_PT_mesh"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "RF Character"
+    bl_parent_id = "RFCHAR_PT_main"
+    bl_order = 0
+
+    @classmethod
+    def poll(cls, context):
+        return _rf_panel_poll(context)
+
+    def draw(self, context):
+        layout = self.layout
+        arm_obj = _find_rf_armature(context)
+        row = layout.row()
+        row.scale_y = 1.2
+        row.operator("rfchar.import_custom_mesh", text="Import Mesh", icon='FILE_FOLDER')
+        col = layout.column(align=True)
+        col.label(text="Move, rotate and scale it to sit")
+        col.label(text="over the RF mesh. No need to apply.")
+
+        parts = _bound_custom_meshes(context, arm_obj)
+        if parts:
+            layout.label(text=f"Bound parts: {', '.join(p.name for p in parts[:3])}"
+                              f"{'...' if len(parts) > 3 else ''}", icon='MESH_DATA')
+
+        box = layout.box()
+        box.label(text="Show / Hide", icon='HIDE_OFF')
+        row = box.row(align=True)
+        row.operator("rfchar.toggle_rf_mesh", text="RF Mesh", icon='MESH_DATA')
+        row.operator("rfchar.toggle_hitboxes", text="Hitboxes", icon='MESH_UVSPHERE')
+        row = box.row(align=True)
+        row.operator("rfchar.toggle_prop_points", text="Props", icon='EMPTY_ARROWS')
+        row.operator("rfchar.toggle_lods", text="LODs", icon='MOD_DECIM')
+
+
+class RFCHAR_PT_WeightsPanel(bpy.types.Panel):
+    bl_label = "3. Weights"
+    bl_idname = "RFCHAR_PT_weights"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "RF Character"
+    bl_parent_id = "RFCHAR_PT_main"
+    bl_order = 1
+
+    @classmethod
+    def poll(cls, context):
+        return _rf_panel_poll(context)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Select your mesh (all its parts):")
+        row = layout.row()
+        row.scale_y = 1.3
+        row.operator("rfchar.transfer_weights", icon='MOD_DATA_TRANSFER')
+        row = layout.row(align=True)
+        row.operator("rfchar.check_weights", icon='VIEWZOOM')
+        row.operator("rfchar.clean_weights", icon='MOD_VERTEX_WEIGHT')
+        obj = context.active_object
+        if obj and obj.type == 'MESH' and not obj.get('rf_original_mesh'):
+            if context.mode == 'PAINT_WEIGHT':
+                layout.operator("object.mode_set", text="Done Painting", icon='OBJECT_DATAMODE').mode = 'OBJECT'
+            else:
+                layout.operator("object.mode_set", text="Weight Paint", icon='WPAINT_HLT').mode = 'WEIGHT_PAINT'
+
+
+class RFCHAR_PT_TexturesPanel(bpy.types.Panel):
+    bl_label = "4. Textures"
+    bl_idname = "RFCHAR_PT_textures"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "RF Character"
+    bl_parent_id = "RFCHAR_PT_main"
+    bl_order = 2
+
+    @classmethod
+    def poll(cls, context):
+        return _rf_panel_poll(context)
+
+    def draw(self, context):
+        layout = self.layout
+        arm_obj = _find_rf_armature(context)
+        objs, note = _export_mesh_objects(context, arm_obj)
+        if not objs:
+            layout.label(text=note, icon='INFO')
+            return
+        slots, _ = _texture_slots(objs)
+
+        over = len(slots) > RF_MAX_TEXTURE_SLOTS
+        layout.label(text=f"{len(slots)} of {RF_MAX_TEXTURE_SLOTS} texture slots",
+                     icon='ERROR' if over else 'TEXTURE')
+        if over:
+            layout.label(text="Share images, or combine (Advanced)")
+
+        for i, s in enumerate(slots):
+            box = layout.box()
+            col = box.column(align=True)
+            row = col.split(factor=0.12, align=True)
+            row.label(text=f"{i}")
+            if s['image'] is not None:
+                row.prop(s['image'], "name", text="")
+            elif s['materials']:
+                row.prop(s['materials'][0], "name", text="")
+            else:
+                row.label(text=s['name'])
+            details = [s['name']]
+            img = s['image']
+            if img is not None and img.size[0]:
+                details.append(f"{img.size[0]}x{img.size[1]}")
+            if s['flags'] & RF_MAT_ALPHA:
+                details.append("alpha")
+            col.label(text="  " + "  ·  ".join(details))
+            p = _slot_problem(s)
+            if p:
+                col.label(text=p[1], icon=p[0])
+
+        original = _rf_original_mesh(arm_obj)
+        if original and original not in objs:
+            box = layout.box()
+            box.label(text="RF mesh slots (stock skins follow these):")
+            col = box.column(align=True)
+            for i, slot in enumerate(original.material_slots):
+                if slot.material:
+                    col.label(text=f"  {i}  {_material_tex_name(slot.material)}")
+        layout.operator("rfchar.copy_skin_line", icon='COPYDOWN')
+
+
+class RFCHAR_PT_ExportPanel(bpy.types.Panel):
+    bl_label = "5. Export"
+    bl_idname = "RFCHAR_PT_export"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "RF Character"
+    bl_parent_id = "RFCHAR_PT_main"
+    bl_order = 3
+
+    @classmethod
+    def poll(cls, context):
+        return _rf_panel_poll(context)
+
+    def draw(self, context):
+        layout = self.layout
+        arm_obj = _find_rf_armature(context)
+        objs, note = _export_mesh_objects(context, arm_obj)
+        if objs:
+            layout.label(text=f"Writes {len(objs)} part{'s' if len(objs) != 1 else ''} as one mesh",
+                         icon='CHECKMARK')
+        if note:
+            layout.label(text=note, icon='INFO')
+        row = layout.row(align=True)
+        row.operator("rfchar.validate_export", text="Validate", icon='CHECKMARK')
+        sub = row.row(align=True)
+        sub.scale_x = 1.4
+        sub.operator("export_scene.rf_v3c", text="Export V3C", icon='EXPORT')
+
+
+class RFCHAR_PT_AnimationsPanel(bpy.types.Panel):
+    bl_label = "Animations"
+    bl_idname = "RFCHAR_PT_animations"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "RF Character"
+    bl_order = 2
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        scn = context.scene
+        arm_obj = _find_rf_armature(context)
+
+        row = layout.row(align=True)
+        row.operator("import_scene.rf_rfa", text="Import RFA", icon='ACTION')
         if arm_obj:
-            row = layout.row(align=True)
             row.operator("rfchar.browse_anim_folder", text="Batch Anims", icon='FILE_FOLDER')
-            row.operator("rfchar.find_textures", text="Find Textures", icon='VIEWZOOM')
-        else:
-            layout.operator("rfchar.find_textures", text="Find Textures", icon='VIEWZOOM')
 
         # ── Master Animation Folder ──
-        layout.separator()
         box = layout.box()
         box.label(text="Master Animation Folder", icon='BOOKMARKS')
         master = _get_master_folder(context)
@@ -6140,22 +6750,8 @@ class RFCHAR_PT_MainPanel(bpy.types.Panel):
             box.operator("rfchar.set_master_folder", text="Set Folder...", icon='FILE_FOLDER')
             box.label(text="Auto-loads anims when you import a V3C", icon='INFO')
 
-        # ── Recent Files ──
-        recent = list(scn.get('rf_recent_v3c', []))
-        if recent:
-            box = layout.box()
-            row = box.row()
-            row.label(text="Recent V3Cs", icon='FILE_REFRESH')
-            row.operator("rfchar.clear_recent", text="", icon='X', emboss=False)
-            col = box.column(align=True)
-            for fp in recent[:5]:
-                name = os.path.basename(fp)
-                op = col.operator("rfchar.import_recent", text=name, icon='FILE')
-                op.filepath = fp
-
         # ── Batch File List (only when files scanned) ──
         if arm_obj and len(scn.rfchar_anim_files) > 0:
-            layout.separator()
             row = layout.row(align=True)
             row.label(text=f"{len(scn.rfchar_anim_files)} files")
             row.operator("rfchar.select_all_anims", text="All")
@@ -6174,48 +6770,41 @@ class RFCHAR_PT_MainPanel(bpy.types.Panel):
                         text=f"Import ({selected_count})", icon='IMPORT')
             row.operator("rfchar.clear_anim_list", text="", icon='X')
 
-        # ── Custom Mesh ──
         if arm_obj:
-            layout.separator()
-            box = layout.box()
-            box.label(text="Custom Mesh", icon='MESH_DATA')
-            col = box.column(align=True)
-            col.operator("rfchar.import_custom_mesh", text="Import Mesh", icon='FILE_FOLDER')
-            col.separator()
-            col.operator("rfchar.bind_to_armature", icon='CONSTRAINT_BONE')
-            col.operator("rfchar.transfer_weights", icon='MOD_DATA_TRANSFER')
-            col.operator("rfchar.check_weights", icon='VIEWZOOM')
-            col.separator()
-            col.operator("rfchar.generate_atlas", text="Combine Textures → Atlas", icon='TEXTURE')
-            col.operator("rfchar.fix_texture_names", text="Sync Texture Names", icon='FILE_REFRESH')
-
-        # ── Visibility ──
-        if arm_obj:
-            layout.separator()
-            box = layout.box()
-            box.label(text="Visibility", icon='HIDE_OFF')
-            row = box.row(align=True)
-            row.operator("rfchar.toggle_rf_mesh", text="Mesh", icon='MESH_DATA')
-            row.operator("rfchar.toggle_hitboxes", text="Hitboxes", icon='MESH_UVSPHERE')
-            row = box.row(align=True)
-            row.operator("rfchar.toggle_prop_points", text="Props", icon='EMPTY_ARROWS')
-            row.operator("rfchar.toggle_lods", text="LODs", icon='MOD_DECIM')
-
-        # ── Export ──
-        if arm_obj:
-            layout.separator()
-            box = layout.box()
-            box.label(text="Export", icon='EXPORT')
-            col = box.column(align=True)
-            col.operator("rfchar.validate_export", text="Validate", icon='CHECKMARK')
-            col.operator("export_scene.rf_v3c", text="Export V3C", icon='MESH_DATA')
-            col.separator()
+            col = layout.column(align=True)
             active_action = arm_obj.animation_data.action if arm_obj.animation_data else None
             if active_action:
                 col.operator("export_scene.rf_rfa",
                            text=f"Export '{active_action.name}'", icon='ACTION')
             else:
                 col.label(text="No active animation", icon='INFO')
+            if _get_rf_actions(arm_obj):
+                col.operator("rfchar.export_all_rfa", icon='EXPORT')
+
+
+class RFCHAR_PT_AdvancedPanel(bpy.types.Panel):
+    bl_label = "Advanced"
+    bl_idname = "RFCHAR_PT_advanced"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "RF Character"
+    bl_order = 3
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return _rf_panel_poll(context)
+
+    def draw(self, context):
+        layout = self.layout
+        col = layout.column(align=True)
+        col.label(text="When there's no RF mesh to copy from:")
+        col.operator("rfchar.bind_to_armature", icon='CONSTRAINT_BONE')
+        layout.separator()
+        col = layout.column(align=True)
+        col.label(text="Textures:")
+        col.operator("rfchar.generate_atlas", text="Combine Textures → Atlas", icon='TEXTURE')
+        col.operator("rfchar.fix_texture_names", text="Sync Texture Names", icon='FILE_REFRESH')
 
 
 class RFCHAR_PT_LoadedAnimsPanel(bpy.types.Panel):
@@ -6224,7 +6813,7 @@ class RFCHAR_PT_LoadedAnimsPanel(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "RF Character"
-    bl_parent_id = "RFCHAR_PT_main"
+    bl_parent_id = "RFCHAR_PT_animations"
 
     @classmethod
     def poll(cls, context):
@@ -6334,7 +6923,7 @@ class RFCHAR_PT_RequiredAnimsPanel(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "RF Character"
-    bl_parent_id = "RFCHAR_PT_main"
+    bl_parent_id = "RFCHAR_PT_animations"
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -6476,6 +7065,8 @@ _classes = (
     RFCHAR_OT_DeleteAnimation,
     RFCHAR_OT_DeleteAllAnimations,
     RFCHAR_OT_CheckWeights,
+    RFCHAR_OT_CleanWeights,
+    RFCHAR_OT_CopySkinLine,
     RFCHAR_OT_FindTextures,
     RFCHAR_OT_LoadRequiredAnims,
     RFCHAR_OT_AutoLoadFromMaster,
@@ -6492,8 +7083,14 @@ _classes = (
     RFCHAR_OT_ExportV3C,
     RFCHAR_PT_WorkflowPanel,
     RFCHAR_PT_MainPanel,
+    RFCHAR_PT_MeshPanel,
+    RFCHAR_PT_WeightsPanel,
+    RFCHAR_PT_TexturesPanel,
+    RFCHAR_PT_ExportPanel,
+    RFCHAR_PT_AnimationsPanel,
     RFCHAR_PT_LoadedAnimsPanel,
     RFCHAR_PT_RequiredAnimsPanel,
+    RFCHAR_PT_AdvancedPanel,
 )
 
 def register():
