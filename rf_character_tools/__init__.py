@@ -1,7 +1,7 @@
 bl_info = {
     "name": "RF Character Tools (V3C/V3M/RFA)",
     "author": "RF VFX Tools",
-    "version": (1, 10, 4),
+    "version": (1, 10, 5),
     "blender": (4, 0, 0),
     "location": "File > Import/Export, 3D View > Sidebar > RF Character",
     "description": "Import and export Red Faction character meshes, animations, and rigs",
@@ -6360,6 +6360,10 @@ def _collect_mesh_images(meshes):
     return result
 
 
+# Custom property on an image: whether Combine Textures puts it into the atlas
+ATLAS_TICK = "rf_atlas"
+
+
 class RFCHAR_AtlasImageItem(bpy.types.PropertyGroup):
     """One texture offered to Generate Texture Atlas; name = image datablock name."""
     include: BoolProperty(name="Include", default=True,
@@ -6434,12 +6438,13 @@ class RFCHAR_OT_GenerateAtlas(bpy.types.Operator):
         if remembered:
             self.output_dir = remembered
 
-        # Offer every texture on the selected meshes, all ticked
+        # Offer every texture on the selected meshes. The tick lives on the image
+        # itself (edits to an operator's own list in a dialog don't reach execute),
+        # so it is also remembered for next time; new textures start ticked
         self.images.clear()
         for img in _collect_mesh_images(self._meshes(context)):
-            item = self.images.add()
-            item.name = img.name
-            item.label = f"{img.name}  ({img.size[0]}x{img.size[1]})"
+            if ATLAS_TICK not in img:
+                img[ATLAS_TICK] = True
 
         return context.window_manager.invoke_props_dialog(self, width=400)
 
@@ -6460,27 +6465,28 @@ class RFCHAR_OT_GenerateAtlas(bpy.types.Operator):
         return meshes
 
     def _included(self, img):
-        """Whether an image goes into the atlas. Called without the dialog
-        (no list filled in), every texture does."""
-        if not self.images:
-            return True
-        item = self.images.get(img.name)
-        return item is None or item.include
+        """Whether an image goes into the atlas: the tick stored on the image, or,
+        when a script passes the images list, that list."""
+        if self.images:
+            item = self.images.get(img.name)
+            return item is None or item.include
+        return bool(img.get(ATLAS_TICK, True))
 
     def draw(self, context):
         layout = self.layout
         meshes = self._meshes(context)
-        if not self.images:
+        images = [img for img in _collect_mesh_images(meshes) if ATLAS_TICK in img]
+        if not images:
             layout.label(text="No textured materials found on selected mesh(es)", icon='ERROR')
             return
 
-        ticked = sum(1 for it in self.images if it.include)
+        ticked = sum(1 for img in images if img[ATLAS_TICK])
         box = layout.box()
-        box.label(text=f"Textures on {len(meshes)} mesh(es): {ticked} of {len(self.images)} ticked",
+        box.label(text=f"Textures on {len(meshes)} mesh(es): {ticked} of {len(images)} ticked",
                   icon='IMAGE_DATA')
         col = box.column(align=True)
-        for item in self.images:
-            col.prop(item, "include", text=item.label)
+        for img in images:
+            col.prop(img, f'["{ATLAS_TICK}"]', text=f"{img.name}  ({img.size[0]}x{img.size[1]})")
 
         layout.separator()
         layout.prop(self, "atlas_name")

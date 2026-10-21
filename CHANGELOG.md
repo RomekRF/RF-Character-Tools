@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.10.5
+
+- Combine Textures ignored the tick boxes when run from the dialog and combined every texture. The ticks are now stored on the images themselves, so they reach the atlas, and the dialog remembers them next time.
+
 ## v1.10.4 — Review fixes
 
 Checked against all 95 stock character meshes (import, export, compare) and 1,009 stock animations.
