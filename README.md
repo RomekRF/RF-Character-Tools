@@ -34,7 +34,8 @@ Animations and the master animation folder are in the Animations panel. Bind wit
 
 - Convert Textures for RF writes uncompressed TGA: power-of-two size up to a limit you choose (1024 by default), 24-bit, or 32-bit when the material uses the image's alpha. Names keep to ASCII letters, digits, `_` and `-`, 31 characters at most with `.tga`. A material with only a colour gets a 64×64 texture of that colour. Your original files are not changed.
 - Each texture slot is one texture. Parts that use the same image share a slot.
-- Combine Textures lists every texture with a tick box; only ticked textures are merged into the atlas, the rest keep their own materials.
+- Combine Textures lists every texture with a tick box; only ticked textures are merged into the atlas, the rest keep their own materials. Bigger textures get bigger tiles, each tile has a wrapped border, and faces with tiling UVs (outside 0..1) are moved into their tile.
+- Convert and Combine remember the last folder you used.
 
 ## Multiplayer characters and skins
 

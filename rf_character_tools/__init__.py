@@ -1,7 +1,7 @@
 bl_info = {
     "name": "RF Character Tools (V3C/V3M/RFA)",
     "author": "RF VFX Tools",
-    "version": (1, 10, 2),
+    "version": (1, 10, 3),
     "blender": (4, 0, 0),
     "location": "File > Import/Export, 3D View > Sidebar > RF Character",
     "description": "Import and export Red Faction character meshes, animations, and rigs",
@@ -5564,10 +5564,9 @@ def _save_slot_texture(slot, path, resize_pow2=True):
     return _write_tga(slot['image'], path, bool(slot['flags'] & RF_MAT_ALPHA), resize_pow2)
 
 
-def _write_tga(img, path, use_alpha, resize_pow2=True, max_size=0):
-    """Write a Blender image as an uncompressed TGA (24-bit, or 32-bit with
-    use_alpha), optionally resized to powers of two and capped at max_size.
-    Returns an error string or None."""
+def _image_rgba(img):
+    """A Blender image as an (h, w, 4) float array in sRGB (as stored in a TGA),
+    or None when it has no pixels (file missing)."""
     import numpy as np
     try:
         if img.source == 'FILE' and not img.has_data:
@@ -5576,7 +5575,7 @@ def _write_tga(img, path, use_alpha, resize_pow2=True, max_size=0):
         pass
     w, h = img.size[0], img.size[1]
     if not w or not h:
-        return "image not loaded (file missing?)"
+        return None
     ch = img.channels
     buf = np.empty(w * h * ch, dtype=np.float32)
     img.pixels.foreach_get(buf)
@@ -5592,11 +5591,38 @@ def _write_tga(img, path, use_alpha, resize_pow2=True, max_size=0):
         # Float images are held in linear light; TGA wants sRGB
         c = np.clip(rgba[..., :3], 0.0, 1.0)
         rgba[..., :3] = np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(c, 1.0 / 2.4) - 0.055)
+    return rgba
+
+
+def _resize_rgba(rgba, w, h):
+    """Scale an (h, w, 4) float array with Blender's image scaler."""
+    import numpy as np
+    sh, sw = rgba.shape[0], rgba.shape[1]
+    if (sw, sh) == (w, h):
+        return rgba
+    tmp = bpy.data.images.new("__rf_resize", sw, sh, alpha=True, float_buffer=True)
+    try:
+        tmp.pixels.foreach_set(rgba.ravel())
+        tmp.scale(w, h)
+        out = np.empty(w * h * 4, dtype=np.float32)
+        tmp.pixels.foreach_get(out)
+        return out.reshape(h, w, 4)
+    finally:
+        bpy.data.images.remove(tmp)
+
+
+def _write_tga(img, path, use_alpha, resize_pow2=True, max_size=0):
+    """Write a Blender image as an uncompressed TGA (24-bit, or 32-bit with
+    use_alpha), optionally resized to powers of two and capped at max_size.
+    Returns an error string or None."""
+    rgba = _image_rgba(img)
+    if rgba is None:
+        return "image not loaded (file missing?)"
     return _write_rgba_tga(rgba, path, use_alpha, resize_pow2, max_size)
 
 
-def _write_rgba_tga(rgba, path, use_alpha, resize_pow2=True, max_size=0):
-    """Write an (h, w, 4) sRGB float array as an uncompressed TGA."""
+def _write_rgba_tga(rgba, path, use_alpha, resize_pow2=True, max_size=0, file_format='TARGA_RAW'):
+    """Write an (h, w, 4) sRGB float array as an uncompressed TGA (or PNG)."""
     h, w = rgba.shape[0], rgba.shape[1]
     out = bpy.data.images.new("__rf_texture_export", w, h, alpha=use_alpha)
     try:
@@ -5607,13 +5633,62 @@ def _write_rgba_tga(rgba, path, use_alpha, resize_pow2=True, max_size=0):
         if size != (w, h):
             out.scale(*size)
         out.filepath_raw = path
-        out.file_format = 'TARGA_RAW'
+        out.file_format = file_format
         out.save()
     except Exception as e:
         return str(e)
     finally:
         bpy.data.images.remove(out)
     return None
+
+
+def _pack_pow2_squares(sizes, atlas_size):
+    """Place power-of-two squares, largest first, in a power-of-two atlas by
+    splitting free cells in four. Returns {key: (x, y)} from the bottom-left;
+    everything fits whenever the total area does."""
+    free = [(0, 0, atlas_size)]
+    placed = {}
+    for key in sorted(sizes, key=lambda k: -sizes[k]):
+        s = sizes[key]
+        free.sort(key=lambda c: (c[2], c[1], c[0]))
+        i = next(i for i, c in enumerate(free) if c[2] >= s)
+        x, y, c = free.pop(i)
+        while c > s:
+            c //= 2
+            free += [(x + c, y, c), (x, y + c, c), (x + c, y + c, c)]
+        placed[key] = (x, y)
+    return placed
+
+
+def _texture_folder_config_path():
+    """Config file remembering the last texture output folder (Convert, Combine)."""
+    try:
+        return os.path.join(bpy.utils.user_resource('CONFIG'), 'rf_character_texture_folder.txt')
+    except Exception:
+        return None
+
+
+def _save_texture_folder(path):
+    cfg = _texture_folder_config_path()
+    if not cfg or not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(cfg), exist_ok=True)
+        with open(cfg, 'w', encoding='utf-8') as f:
+            f.write(path)
+    except Exception as e:
+        print(f"[RF Character] Could not save texture folder: {e}")
+
+
+def _load_texture_folder():
+    cfg = _texture_folder_config_path()
+    if not cfg or not os.path.isfile(cfg):
+        return ''
+    try:
+        with open(cfg, 'r', encoding='utf-8') as f:
+            return f.read().strip()
+    except Exception:
+        return ''
 
 
 def _save_slot_textures(slots, folder, resize_pow2=True):
@@ -6075,12 +6150,12 @@ class RFCHAR_OT_GenerateAtlas(bpy.types.Operator):
         # Default name from active object or armature
         arm_obj = _find_rf_armature(context)
         if arm_obj and arm_obj.get('rf_source_file'):
-            self.atlas_name = os.path.splitext(arm_obj['rf_source_file'])[0]
+            self.atlas_name = os.path.splitext(arm_obj['rf_source_file'])[0] + "_atlas"
         elif context.active_object:
-            self.atlas_name = context.active_object.name
+            self.atlas_name = context.active_object.name + "_atlas"
 
-        # Default folder from scene memory
-        remembered = context.scene.get('rf_texture_folder') or context.scene.get('rf_last_anim_folder')
+        # The last texture folder used (remembered across sessions)
+        remembered = _load_texture_folder() or context.scene.get('rf_texture_folder')
         if remembered:
             self.output_dir = remembered
 
@@ -6142,7 +6217,7 @@ class RFCHAR_OT_GenerateAtlas(bpy.types.Operator):
         layout.prop(self, "replace_materials")
 
     def execute(self, context):
-        # Collect meshes
+        import numpy as np
         meshes = self._meshes(context)
         if not meshes:
             self.report({'ERROR'}, "Select a mesh (or meshes) to atlas")
@@ -6152,247 +6227,118 @@ class RFCHAR_OT_GenerateAtlas(bpy.types.Operator):
         if not images_map:
             self.report({'ERROR'}, "No image textures found on any material")
             return {'CANCELLED'}
-
-        img_list = [img for img in images_map.keys() if self._included(img)]
+        img_list = [img for img in images_map if self._included(img)]
         if not img_list:
             self.report({'ERROR'}, "Tick at least one texture to put into the atlas")
             return {'CANCELLED'}
-        n = len(img_list)
-
-        # Grid layout
-        grid_w = math.ceil(math.sqrt(n))
-        grid_h = math.ceil(n / grid_w)
-        atlas_size = int(self.atlas_size)
-        tile_size = atlas_size // max(grid_w, grid_h)
-        if tile_size < 8:
-            self.report({'ERROR'}, f"Atlas size too small for {n} textures. Increase atlas size.")
-            return {'CANCELLED'}
-
-        # Assign each image a tile position
-        # Layout: image i goes at col=i%grid_w, row=i//grid_w, row 0 at TOP
-        tile_positions = {}  # image → (u_offset, v_offset, u_scale, v_scale, px, py_from_bottom)
-        for i, img in enumerate(img_list):
-            col = i % grid_w
-            row = i // grid_w
-            px = col * tile_size
-            py_from_bottom = (grid_h - 1 - row) * tile_size
-            u_off = px / atlas_size
-            v_off = py_from_bottom / atlas_size
-            tile_scale = tile_size / atlas_size
-            tile_positions[img] = (u_off, v_off, tile_scale, tile_scale, px, py_from_bottom)
-
-        # Build atlas using numpy
-        try:
-            import numpy as np
-        except ImportError:
-            self.report({'ERROR'}, "numpy required for atlas generation (should ship with Blender)")
-            return {'CANCELLED'}
-
-        atlas_arr = np.zeros((atlas_size, atlas_size, 4), dtype=np.float32)
-        atlas_arr[:, :, 3] = 1.0  # opaque default
-
-        skipped = []
-        success = 0
-        temp_copies = []
-        try:
-            for img in img_list:
-                u_off, v_off, u_sc, v_sc, px, py = tile_positions[img]
-
-                # Ensure source image is loaded
-                try:
-                    if img.source == 'FILE' and not img.has_data:
-                        img.reload()
-                except Exception:
-                    pass
-
-                # Get source size and validate
-                src_w, src_h = img.size[0], img.size[1]
-                if src_w == 0 or src_h == 0:
-                    skipped.append(f"{img.name} (size 0x0 - not loaded)")
-                    continue
-
-                channels = img.channels if hasattr(img, 'channels') else 4
-
-                # Read pixels from original (don't trust copy.pixels)
-                try:
-                    src_pixels = np.empty(src_w * src_h * channels, dtype=np.float32)
-                    img.pixels.foreach_get(src_pixels)
-                except Exception as e:
-                    skipped.append(f"{img.name} (pixel read failed: {e})")
-                    continue
-
-                # Validate we got actual data
-                if src_pixels.size == 0:
-                    skipped.append(f"{img.name} (empty pixel data)")
-                    continue
-
-                # Reshape to (h, w, channels)
-                try:
-                    src_arr = src_pixels.reshape(src_h, src_w, channels)
-                except Exception as e:
-                    skipped.append(f"{img.name} (reshape failed: {e})")
-                    continue
-
-                # Convert to RGBA
-                if channels == 3:
-                    rgba = np.ones((src_h, src_w, 4), dtype=np.float32)
-                    rgba[:, :, :3] = src_arr
-                    src_arr = rgba
-                elif channels == 1:
-                    rgba = np.ones((src_h, src_w, 4), dtype=np.float32)
-                    rgba[:, :, 0] = src_arr[:, :, 0]
-                    rgba[:, :, 1] = src_arr[:, :, 0]
-                    rgba[:, :, 2] = src_arr[:, :, 0]
-                    src_arr = rgba
-                elif channels != 4:
-                    skipped.append(f"{img.name} (unsupported channels: {channels})")
-                    continue
-
-                # Fix broken alpha (all zeros means opaque)
-                if np.all(src_arr[:, :, 3] == 0):
-                    src_arr = src_arr.copy()
-                    src_arr[:, :, 3] = 1.0
-
-                # Resize to tile_size × tile_size using nearest-neighbor via numpy
-                # (Pillow would be better but may not be available)
-                if src_w != tile_size or src_h != tile_size:
-                    # Use linear interpolation via Blender's scale() on a copy
-                    try:
-                        img_copy = img.copy()
-                        temp_copies.append(img_copy)
-                        img_copy.scale(tile_size, tile_size)
-                        scaled_pixels = np.empty(tile_size * tile_size * img_copy.channels, dtype=np.float32)
-                        img_copy.pixels.foreach_get(scaled_pixels)
-                        scaled_arr = scaled_pixels.reshape(tile_size, tile_size, img_copy.channels)
-                        # Convert to RGBA if needed
-                        if img_copy.channels == 3:
-                            rgba = np.ones((tile_size, tile_size, 4), dtype=np.float32)
-                            rgba[:, :, :3] = scaled_arr
-                            scaled_arr = rgba
-                        elif img_copy.channels == 1:
-                            rgba = np.ones((tile_size, tile_size, 4), dtype=np.float32)
-                            rgba[:, :, 0] = scaled_arr[:, :, 0]
-                            rgba[:, :, 1] = scaled_arr[:, :, 0]
-                            rgba[:, :, 2] = scaled_arr[:, :, 0]
-                            scaled_arr = rgba
-                        if np.all(scaled_arr[:, :, 3] == 0):
-                            scaled_arr = scaled_arr.copy()
-                            scaled_arr[:, :, 3] = 1.0
-                        src_arr = scaled_arr
-                    except Exception as e:
-                        # Fallback: nearest-neighbor via numpy
-                        y_idx = (np.arange(tile_size) * src_h // tile_size).astype(np.int32)
-                        x_idx = (np.arange(tile_size) * src_w // tile_size).astype(np.int32)
-                        src_arr = src_arr[y_idx[:, None], x_idx[None, :]]
-
-                # Write to atlas
-                try:
-                    atlas_arr[py:py+tile_size, px:px+tile_size] = src_arr
-                    success += 1
-                except Exception as e:
-                    skipped.append(f"{img.name} (atlas write failed: {e})")
-                    continue
-        finally:
-            for tc in temp_copies:
-                try:
-                    bpy.data.images.remove(tc)
-                except Exception:
-                    pass
-
-        if success == 0:
-            self.report({'ERROR'}, f"No textures could be read. Skipped: {'; '.join(skipped[:3])}")
-            return {'CANCELLED'}
-
-        if skipped:
-            self.report({'WARNING'}, f"Skipped {len(skipped)}: {'; '.join(skipped[:2])}")
-
-        # Create Blender atlas image
-        atlas_img_name = self.atlas_name + (".tga" if self.file_format == 'TGA' else ".png")
-        # Remove existing image with same name if any
-        existing = bpy.data.images.get(atlas_img_name)
-        if existing:
-            bpy.data.images.remove(existing)
-        atlas_img = bpy.data.images.new(atlas_img_name, atlas_size, atlas_size, alpha=True)
-
-        # Write pixels — foreach_set is much faster and more reliable than = list
-        flat = atlas_arr.flatten()
-        try:
-            atlas_img.pixels.foreach_set(flat)
-        except Exception:
-            atlas_img.pixels = flat.tolist()
-        atlas_img.update()
-
-        # Save to disk
         if not self.output_dir:
             self.report({'ERROR'}, "Pick an output folder")
             return {'CANCELLED'}
         out_folder = bpy.path.abspath(self.output_dir)
-        if not os.path.isdir(out_folder):
-            try:
-                os.makedirs(out_folder, exist_ok=True)
-            except Exception as e:
-                self.report({'ERROR'}, f"Can't create folder: {e}")
-                return {'CANCELLED'}
-
-        out_path = os.path.join(out_folder, atlas_img_name)
-        atlas_img.filepath_raw = out_path
-        atlas_img.file_format = 'TARGA' if self.file_format == 'TGA' else 'PNG'
         try:
-            atlas_img.save()
+            os.makedirs(out_folder, exist_ok=True)
         except Exception as e:
-            self.report({'ERROR'}, f"Save failed: {e}")
+            self.report({'ERROR'}, f"Can't create folder: {e}")
             return {'CANCELLED'}
 
-        # Remember folder
+        # Read every ticked texture
+        pixels = {}
+        skipped = []
+        for img in img_list:
+            rgba = _image_rgba(img)
+            if rgba is None:
+                skipped.append(img.name)
+            else:
+                pixels[img] = rgba
+        img_list = [img for img in img_list if img in pixels]
+        if not img_list:
+            self.report({'ERROR'}, f"No textures could be read (files missing?): {', '.join(skipped[:3])}")
+            return {'CANCELLED'}
+
+        # Square power-of-two tiles: bigger textures get more room; halve the
+        # biggest until they all fit
+        atlas_size = int(self.atlas_size)
+        sizes = {img: min(_nearest_pow2(max(a.shape[0], a.shape[1])), atlas_size)
+                 for img, a in pixels.items()}
+        while sum(s * s for s in sizes.values()) > atlas_size * atlas_size:
+            biggest = max(sizes, key=lambda k: sizes[k])
+            if sizes[biggest] <= 16:
+                self.report({'ERROR'}, f"{len(sizes)} textures don't fit a {atlas_size} atlas. "
+                                       "Pick a bigger size")
+                return {'CANCELLED'}
+            sizes[biggest] //= 2
+        positions = _pack_pow2_squares(sizes, atlas_size)
+
+        # Compose. Each tile keeps a border copied from its opposite edge (the
+        # texture wraps), so filtering and faces that overhang their tile a
+        # little still show the right texture
+        atlas = np.zeros((atlas_size, atlas_size, 4), dtype=np.float32)
+        atlas[..., 3] = 1.0
+        rects = {}   # image -> (u0, v0, uv size of the texture inside its tile, wrap margin)
+        for img in img_list:
+            s = sizes[img]
+            x, y = positions[img]
+            pad = max(1, s // 32)
+            inner = s - 2 * pad
+            tile = _resize_rgba(pixels[img], inner, inner)
+            tile = np.pad(tile, ((pad, pad), (pad, pad), (0, 0)), mode='wrap')
+            atlas[y:y + s, x:x + s] = tile
+            rects[img] = ((x + pad) / atlas_size, (y + pad) / atlas_size, inner / atlas_size, pad / inner)
+
+        uses_alpha = any(_material_uses_alpha(m) for img in img_list
+                         for _, m in _image_materials(images_map[img]))
+        ext = ".tga" if self.file_format == 'TGA' else ".png"
+        atlas_img_name = self.atlas_name + ext
+        out_path = os.path.join(out_folder, atlas_img_name)
+        err = _write_rgba_tga(atlas, out_path, uses_alpha, resize_pow2=False,
+                              file_format='TARGA_RAW' if self.file_format == 'TGA' else 'PNG')
+        if err:
+            self.report({'ERROR'}, f"Save failed: {err}")
+            return {'CANCELLED'}
+        atlas_img = bpy.data.images.load(out_path, check_existing=True)
+        atlas_img.reload()
+
         context.scene['rf_texture_folder'] = out_folder
+        _save_texture_folder(self.output_dir)
 
         # Each mesh datablock once, even when several selected objects share it
         unique_meshes = list({id(o.data): o for o in meshes}.values())
 
-        # Remap UVs (only faces whose texture went into the atlas)
+        # Remap UVs of the faces whose texture went into the atlas. A face lying
+        # outside 0..1 (tiling UVs) is first moved back by whole texture repeats
+        overhang = 0
         if self.remap_uvs:
             for obj in unique_meshes:
                 mesh = obj.data
                 uv_layer = mesh.uv_layers.active
                 if not uv_layer:
                     continue
+                slot_img = {i: _material_base_color_image(s.material)
+                            for i, s in enumerate(obj.material_slots)}
+                uvs = [0.0] * (2 * len(mesh.loops))
+                uv_layer.data.foreach_get('uv', uvs)
                 for poly in mesh.polygons:
-                    mat_idx = poly.material_index
-                    if mat_idx >= len(obj.material_slots):
+                    rect = rects.get(slot_img.get(poly.material_index))
+                    if not rect:
                         continue
-                    mat = obj.material_slots[mat_idx].material
-                    if not mat:
-                        continue
-                    # Find image for this material
-                    img = None
-                    if mat.use_nodes and mat.node_tree:
-                        bsdf = mat.node_tree.nodes.get('Principled BSDF')
-                        if bsdf and 'Base Color' in bsdf.inputs:
-                            for link in bsdf.inputs['Base Color'].links:
-                                if link.from_node.type == 'TEX_IMAGE' and link.from_node.image:
-                                    img = link.from_node.image
-                                    break
-                        if not img:
-                            for node in mat.node_tree.nodes:
-                                if node.type == 'TEX_IMAGE' and node.image:
-                                    img = node.image
-                                    break
-                    if img not in tile_positions:
-                        continue
-                    u_off, v_off, u_sc, v_sc, _, _ = tile_positions[img]
-                    for loop_idx in poly.loop_indices:
-                        old_u, old_v = uv_layer.data[loop_idx].uv
-                        new_u = old_u * u_sc + u_off
-                        new_v = old_v * v_sc + v_off
-                        uv_layer.data[loop_idx].uv = (new_u, new_v)
+                    u0, v0, size, margin = rect
+                    loops = poly.loop_indices
+                    us = [uvs[2 * l] for l in loops]
+                    vs = [uvs[2 * l + 1] for l in loops]
+                    fu = math.floor(min(us) + 1e-3)
+                    fv = math.floor(min(vs) + 1e-3)
+                    if max(us) - fu > 1.0 + margin or max(vs) - fv > 1.0 + margin:
+                        overhang += 1
+                    for l in loops:
+                        uvs[2 * l] = u0 + (uvs[2 * l] - fu) * size
+                        uvs[2 * l + 1] = v0 + (uvs[2 * l + 1] - fv) * size
+                uv_layer.data.foreach_set('uv', uvs)
+                mesh.update()
 
         # Replace the atlased materials with one atlas material; the rest stay
         if self.replace_materials:
             atlased = set(img_list)
-            uses_alpha = any(_material_uses_alpha(m) for img in img_list
-                             for _, m in _image_materials(images_map[img]))
             atlas_mat = _atlas_material(self.atlas_name, atlas_img, uses_alpha)
-
             for obj in unique_meshes:
                 mesh = obj.data
                 old_mats = list(mesh.materials)
@@ -6416,10 +6362,16 @@ class RFCHAR_OT_GenerateAtlas(bpy.types.Operator):
                 mesh.polygons.foreach_set('material_index', indices)
                 mesh.update()
 
-        left = len(images_map) - n
+        for name in skipped:
+            self.report({'WARNING'}, f"Not combined (file missing?): {name}")
+        if overhang:
+            self.report({'WARNING'}, f"{overhang} faces stretch across a texture repeat and may show "
+                                     "a neighbouring texture")
+        left = len(images_map) - len(img_list)
+        tiles = ", ".join(f"{sizes[i]}" for i in img_list)
         self.report({'INFO'},
-            f"Atlas '{atlas_img_name}' saved — {n} textures → {atlas_size}x{atlas_size} (tile {tile_size}x{tile_size})"
-            + (f", {left} left as they were" if left else ""))
+            f"Atlas '{atlas_img_name}' saved: {len(img_list)} textures in {atlas_size}x{atlas_size} "
+            f"(tiles {tiles})" + (f", {left} left as they were" if left else ""))
         return {'FINISHED'}
 
 
@@ -6809,11 +6761,13 @@ class RFCHAR_OT_ConvertTextures(bpy.types.Operator):
 
     def invoke(self, context, event):
         if not self.directory:
-            remembered = context.scene.get('rf_texture_folder')
-            if bpy.data.filepath:
-                self.directory = os.path.join(os.path.dirname(bpy.data.filepath), 'rf_textures')
-            elif remembered:
+            # The last texture folder used (remembered across sessions), else
+            # an rf_textures folder next to the .blend
+            remembered = _load_texture_folder() or context.scene.get('rf_texture_folder')
+            if remembered:
                 self.directory = remembered
+            elif bpy.data.filepath:
+                self.directory = os.path.join(os.path.dirname(bpy.data.filepath), 'rf_textures')
         return context.window_manager.invoke_props_dialog(self, width=420)
 
     def draw(self, context):
@@ -6868,6 +6822,7 @@ class RFCHAR_OT_ConvertTextures(bpy.types.Operator):
             done += 1
 
         context.scene['rf_texture_folder'] = folder
+        _save_texture_folder(self.directory)
         for p in problems:
             self.report({'WARNING'}, f"Not converted: {p}")
         self.report({'INFO'}, f"Converted {done} texture{'s' if done != 1 else ''} into {folder}")
@@ -7088,7 +7043,8 @@ class RFCHAR_PT_TexturesPanel(bpy.types.Panel):
             box.label(text="Uses alpha (saved 32-bit)")
         p = _slot_problem(s)
         if p:
-            box.label(text=p[1], icon=p[0])
+            # Blender has no 'WARNING' icon: 'ERROR' is the warning triangle
+            box.label(text=p[1], icon='CANCEL' if p[0] == 'ERROR' else 'ERROR')
 
         layout.operator("rfchar.generate_atlas", text="Combine Textures...", icon='TEXTURE')
 

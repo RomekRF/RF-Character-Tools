@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.10.3
+
+- Fixed the Textures panel failing (Blender listing every icon name) when the picked texture had a warning: Blender has no 'WARNING' icon.
+- Combine Textures rebuilt:
+  - Bigger textures get bigger tiles (powers of two, halved only as needed to fit) instead of equal squares.
+  - Each tile has a border copied from its opposite edge, so filtering and tiling don't pick up the neighbouring texture.
+  - Faces whose UVs lie outside 0..1 (tiling UVs) are moved back by whole repeats before going into their tile; faces that stretch across a repeat are counted in a warning.
+  - Float images (EXR, 16-bit) keep their colours; the atlas is saved as uncompressed TGA (or PNG), 32-bit only when a combined texture uses alpha.
+  - Default atlas name is `<character>_atlas`, so it can't replace a stock texture of the character's name.
+- Combine Textures and Convert Textures for RF remember the last output folder across Blender sessions and files.
+
 ## v1.10.2 — Textures panel
 
 - New Convert Textures for RF: writes every texture of your mesh as an RF-ready TGA into one folder (power-of-two size up to a chosen limit, 24/32-bit, safe names of 31 characters or fewer) and switches your materials to those files. Materials with only a colour get a texture of that colour.
