@@ -1,7 +1,7 @@
 bl_info = {
     "name": "RF Character Tools (V3C/V3M/RFA)",
     "author": "RF VFX Tools",
-    "version": (1, 10, 0),
+    "version": (1, 10, 1),
     "blender": (4, 0, 0),
     "location": "File > Import/Export, 3D View > Sidebar > RF Character",
     "description": "Import and export Red Faction character meshes, animations, and rigs",
@@ -6004,11 +6004,21 @@ def _collect_mesh_images(meshes):
     return result
 
 
+class RFCHAR_AtlasImageItem(bpy.types.PropertyGroup):
+    """One texture offered to Generate Texture Atlas; name = image datablock name."""
+    include: BoolProperty(name="Include", default=True,
+                          description="Put this texture into the atlas. Unticked textures keep their own material")
+    label: StringProperty()
+
+
 class RFCHAR_OT_GenerateAtlas(bpy.types.Operator):
     bl_idname = "rfchar.generate_atlas"
     bl_label = "Generate Texture Atlas"
-    bl_description = "Combine the selected mesh's material textures into a single atlas TGA, remap UVs, and replace materials"
+    bl_description = ("Combine the ticked textures of the selected meshes into one atlas TGA, remap their UVs "
+                      "and give those faces one atlas material. Unticked textures are left as they are")
     bl_options = {'REGISTER', 'UNDO'}
+
+    images: CollectionProperty(type=RFCHAR_AtlasImageItem)
 
     atlas_size: EnumProperty(
         name="Size",
@@ -6068,27 +6078,47 @@ class RFCHAR_OT_GenerateAtlas(bpy.types.Operator):
         if remembered:
             self.output_dir = remembered
 
+        # Offer every texture on the selected meshes, all ticked
+        self.images.clear()
+        for img in _collect_mesh_images(self._meshes(context)):
+            item = self.images.add()
+            item.name = img.name
+            item.label = f"{img.name}  ({img.size[0]}x{img.size[1]})"
+
         return context.window_manager.invoke_props_dialog(self, width=400)
+
+    @staticmethod
+    def _meshes(context):
+        """Selected meshes (or the active one), never the imported RF meshes."""
+        meshes = [o for o in context.selected_objects
+                  if o.type == 'MESH' and not o.get('rf_original_mesh')]
+        active = context.active_object
+        if not meshes and active and active.type == 'MESH' and not active.get('rf_original_mesh'):
+            meshes = [active]
+        return meshes
+
+    def _included(self, img):
+        """Whether an image goes into the atlas. Called without the dialog
+        (no list filled in), every texture does."""
+        if not self.images:
+            return True
+        item = self.images.get(img.name)
+        return item is None or item.include
 
     def draw(self, context):
         layout = self.layout
-        meshes = [o for o in context.selected_objects if o.type == 'MESH']
-        if not meshes and context.active_object and context.active_object.type == 'MESH':
-            meshes = [context.active_object]
-        images = _collect_mesh_images(meshes)
-
-        if not images:
+        meshes = self._meshes(context)
+        if not self.images:
             layout.label(text="No textured materials found on selected mesh(es)", icon='ERROR')
             return
 
+        ticked = sum(1 for it in self.images if it.include)
         box = layout.box()
-        box.label(text=f"Found {len(images)} texture(s) on {len(meshes)} mesh(es):", icon='IMAGE_DATA')
+        box.label(text=f"Textures on {len(meshes)} mesh(es): {ticked} of {len(self.images)} ticked",
+                  icon='IMAGE_DATA')
         col = box.column(align=True)
-        for img, uses in list(images.items())[:8]:
-            size_txt = f"{img.size[0]}x{img.size[1]}"
-            col.label(text=f"  · {img.name}  ({size_txt})", icon='IMAGE')
-        if len(images) > 8:
-            col.label(text=f"  ...and {len(images) - 8} more")
+        for item in self.images:
+            col.prop(item, "include", text=item.label)
 
         layout.separator()
         layout.prop(self, "atlas_name")
@@ -6101,9 +6131,7 @@ class RFCHAR_OT_GenerateAtlas(bpy.types.Operator):
 
     def execute(self, context):
         # Collect meshes
-        meshes = [o for o in context.selected_objects if o.type == 'MESH']
-        if not meshes and context.active_object and context.active_object.type == 'MESH':
-            meshes = [context.active_object]
+        meshes = self._meshes(context)
         if not meshes:
             self.report({'ERROR'}, "Select a mesh (or meshes) to atlas")
             return {'CANCELLED'}
@@ -6113,7 +6141,10 @@ class RFCHAR_OT_GenerateAtlas(bpy.types.Operator):
             self.report({'ERROR'}, "No image textures found on any material")
             return {'CANCELLED'}
 
-        img_list = list(images_map.keys())
+        img_list = [img for img in images_map.keys() if self._included(img)]
+        if not img_list:
+            self.report({'ERROR'}, "Tick at least one texture to put into the atlas")
+            return {'CANCELLED'}
         n = len(img_list)
 
         # Grid layout
@@ -6303,9 +6334,12 @@ class RFCHAR_OT_GenerateAtlas(bpy.types.Operator):
         # Remember folder
         context.scene['rf_texture_folder'] = out_folder
 
-        # Remap UVs
+        # Each mesh datablock once, even when several selected objects share it
+        unique_meshes = list({id(o.data): o for o in meshes}.values())
+
+        # Remap UVs (only faces whose texture went into the atlas)
         if self.remap_uvs:
-            for obj in meshes:
+            for obj in unique_meshes:
                 mesh = obj.data
                 uv_layer = mesh.uv_layers.active
                 if not uv_layer:
@@ -6340,33 +6374,69 @@ class RFCHAR_OT_GenerateAtlas(bpy.types.Operator):
                         new_v = old_v * v_sc + v_off
                         uv_layer.data[loop_idx].uv = (new_u, new_v)
 
-        # Replace materials with atlas material
+        # Replace the atlased materials with one atlas material; the rest stay
         if self.replace_materials:
-            # Name the material EXACTLY like the atlas filename (without extension)
-            # This ensures the material name matches the texture for V3C export
-            atlas_mat_name = self.atlas_name
-            atlas_mat = bpy.data.materials.get(atlas_mat_name)
-            if atlas_mat:
-                bpy.data.materials.remove(atlas_mat)
-            atlas_mat = bpy.data.materials.new(atlas_mat_name)
-            atlas_mat.use_nodes = True
-            nodes = atlas_mat.node_tree.nodes
-            bsdf = nodes.get('Principled BSDF')
-            if not bsdf:
-                bsdf = nodes.new('ShaderNodeBsdfPrincipled')
-            tex_node = nodes.new('ShaderNodeTexImage')
-            tex_node.image = atlas_img
-            tex_node.location = (-300, 300)
-            atlas_mat.node_tree.links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
-            atlas_mat.use_backface_culling = False
+            atlased = set(img_list)
+            uses_alpha = any(_material_uses_alpha(m) for img in img_list
+                             for _, m in _image_materials(images_map[img]))
+            atlas_mat = _atlas_material(self.atlas_name, atlas_img, uses_alpha)
 
-            for obj in meshes:
-                obj.data.materials.clear()
-                obj.data.materials.append(atlas_mat)
+            for obj in unique_meshes:
+                mesh = obj.data
+                old_mats = list(mesh.materials)
+                into_atlas = {i for i, m in enumerate(old_mats)
+                              if _material_base_color_image(m) in atlased}
+                if not into_atlas:
+                    continue
+                keep = [i for i in range(len(old_mats)) if i not in into_atlas]
+                new_index = {old: new for new, old in enumerate(keep)}
+                atlas_index = len(keep)
+                for i in into_atlas:
+                    new_index[i] = atlas_index
+                indices = [0] * len(mesh.polygons)
+                mesh.polygons.foreach_get('material_index', indices)
+                last = max(len(old_mats) - 1, 0)
+                indices = [new_index.get(min(mi, last), atlas_index) for mi in indices]
+                mesh.materials.clear()
+                for i in keep:
+                    mesh.materials.append(old_mats[i])
+                mesh.materials.append(atlas_mat)
+                mesh.polygons.foreach_set('material_index', indices)
+                mesh.update()
 
+        left = len(images_map) - n
         self.report({'INFO'},
-            f"Atlas '{atlas_img_name}' saved — {n} textures → {atlas_size}x{atlas_size} (tile {tile_size}x{tile_size})")
+            f"Atlas '{atlas_img_name}' saved — {n} textures → {atlas_size}x{atlas_size} (tile {tile_size}x{tile_size})"
+            + (f", {left} left as they were" if left else ""))
         return {'FINISHED'}
+
+
+def _image_materials(uses):
+    """(object, material) pairs for an image's (object, slot index) uses."""
+    out = []
+    for obj, slot_idx in uses:
+        if slot_idx < len(obj.material_slots) and obj.material_slots[slot_idx].material:
+            out.append((obj, obj.material_slots[slot_idx].material))
+    return out
+
+
+def _atlas_material(name, atlas_img, uses_alpha):
+    """The atlas material, named like the atlas file (so the V3C names the texture
+    right). An existing one is rebuilt in place, so meshes already using it keep it."""
+    mat = bpy.data.materials.get(name) or bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    for node in [n for n in nt.nodes if n.type == 'TEX_IMAGE']:
+        nt.nodes.remove(node)
+    bsdf = nt.nodes.get('Principled BSDF') or nt.nodes.new('ShaderNodeBsdfPrincipled')
+    tex_node = nt.nodes.new('ShaderNodeTexImage')
+    tex_node.image = atlas_img
+    tex_node.location = (-300, 300)
+    nt.links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
+    if uses_alpha:
+        nt.links.new(tex_node.outputs['Alpha'], bsdf.inputs['Alpha'])
+    mat.use_backface_culling = False
+    return mat
 
 
 class RFCHAR_OT_FixTextureNames(bpy.types.Operator):
@@ -6475,16 +6545,14 @@ class RFCHAR_OT_CopySkinLine(bpy.types.Operator):
     bl_idname = "rfchar.copy_skin_line"
     bl_label = "Copy Skin Line"
     bl_description = (
-        "Copy an entity.tbl $Skin line listing your textures in slot order. A skin replaces a "
-        "character's textures by slot number, so a stock skin would put stock textures on your mesh. "
-        "Paste the line under the character's entity, raise its $Num Skins by one and use the skin "
-        "name as $SkinName in pc_multi.tbl"
+        "Copy an entity.tbl $Skin line listing your textures in slot order (the line is also shown in "
+        "the Textures panel). A skin replaces a character's textures by slot number, so a stock skin "
+        "would put stock textures on your mesh. Paste the line under the character's entity, raise its "
+        "$Num Skins by one and use the skin name as $SkinName in pc_multi.tbl"
     )
 
-    skin_name: StringProperty(name="Skin name", default="custom")
-
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self)
+    skin_name: StringProperty(name="Skin name", default="",
+                              description="Skin name to write; empty uses the name in the Textures panel")
 
     def execute(self, context):
         arm_obj = _find_rf_armature(context)
@@ -6496,8 +6564,32 @@ class RFCHAR_OT_CopySkinLine(bpy.types.Operator):
             self.report({'ERROR'}, note)
             return {'CANCELLED'}
         slots, _ = _texture_slots(objs)
-        line = _skin_line(slots, self.skin_name)
-        context.window_manager.clipboard = line
+        name = self.skin_name or context.scene.rfchar_skin_name or "custom"
+        line = _skin_line(slots, name)
+        print(f"[RF Character] {line}")
+
+        wm = context.window_manager
+        wm.clipboard = line
+        if wm.clipboard != line:
+            self.report({'WARNING'}, "Couldn't write to the clipboard. The line is shown in the "
+                                     "Textures panel and in the System Console")
+            return {'FINISHED'}
+
+        def draw(menu, _context):
+            col = menu.layout.column(align=True)
+            col.label(text=f'$Skin: "{name}" (')
+            for s in slots:
+                col.label(text=f'      "{s["name"]}"')
+            col.label(text=")")
+            col.separator()
+            col.label(text="Paste it under the character's other $Skin lines in entity.tbl,")
+            col.label(text="raise that entity's $Num Skins by one, then set")
+            col.label(text=f'$SkinName: "{name}" on the character in pc_multi.tbl')
+
+        try:
+            wm.popup_menu(draw, title="Skin line copied to the clipboard", icon='COPYDOWN')
+        except Exception:
+            pass
         self.report({'INFO'}, f"Copied: {line}")
         return {'FINISHED'}
 
@@ -6685,7 +6777,19 @@ class RFCHAR_PT_TexturesPanel(bpy.types.Panel):
             for i, slot in enumerate(original.material_slots):
                 if slot.material:
                     col.label(text=f"  {i}  {_material_tex_name(slot.material)}")
-        layout.operator("rfchar.copy_skin_line", icon='COPYDOWN')
+
+        # The skin line, readable here even if the clipboard fails
+        box = layout.box()
+        box.label(text="Skin line for entity.tbl:")
+        row = box.row(align=True)
+        row.prop(context.scene, "rfchar_skin_name", text="")
+        row.operator("rfchar.copy_skin_line", text="Copy", icon='COPYDOWN')
+        name = context.scene.rfchar_skin_name or "custom"
+        col = box.column(align=True)
+        col.label(text=f'$Skin: "{name}" (')
+        for s in slots:
+            col.label(text=f'      "{s["name"]}"')
+        col.label(text=")")
 
 
 class RFCHAR_PT_ExportPanel(bpy.types.Panel):
@@ -7045,6 +7149,7 @@ def _menu_export(self, context):
 
 _classes = (
     RFCHAR_AnimFileItem,
+    RFCHAR_AtlasImageItem,
     RFCHAR_UL_AnimList,
     RFCHAR_OT_ImportV3C,
     RFCHAR_OT_ImportRFA,
@@ -7149,6 +7254,11 @@ def register():
         description="When enabled, importing a V3C automatically imports its required animations from the master folder",
         default=True,
     )
+    bpy.types.Scene.rfchar_skin_name = StringProperty(
+        name="Skin name",
+        description="Name of the entity.tbl skin; pc_multi.tbl picks it with $SkinName",
+        default="custom",
+    )
 
 
 def unregister():
@@ -7161,7 +7271,7 @@ def unregister():
             pass
 
     # Remove scene properties safely
-    for prop in ('rfchar_auto_load_anims', 'rfchar_required_filter', 'rfchar_anim_group_by',
+    for prop in ('rfchar_skin_name', 'rfchar_auto_load_anims', 'rfchar_required_filter', 'rfchar_anim_group_by',
                  'rfchar_anim_show_missing', 'rfchar_anim_show_loaded',
                  'rfchar_anim_search', 'rfchar_anim_list_index',
                  'rfchar_anim_files', 'rfchar_anim_dir'):

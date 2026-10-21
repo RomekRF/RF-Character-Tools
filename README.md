@@ -34,7 +34,8 @@ Animations and the master animation folder are in the Animations panel. Bind wit
 
 - Each texture slot is one texture. Parts that use the same image share a slot.
 - Opaque textures are saved as 24-bit TGA and alpha textures (an image Alpha output connected in the material) as 32-bit TGA, resized to a power of two.
-- An entity skin (`$Skin` in entity.tbl, chosen by `$SkinName` in pc_multi.tbl) replaces a character's textures by slot number. A stock skin therefore puts the stock textures on a custom mesh. Copy Skin Line in the Textures panel copies a `$Skin` line that lists your textures in slot order; paste it under the character's entity and raise its `$Num Skins` by one.
+- An entity skin (`$Skin` in entity.tbl, chosen by `$SkinName` in pc_multi.tbl) replaces a character's textures by slot number. A stock skin therefore puts the stock textures on a custom mesh. The Textures panel shows a `$Skin` line that lists your textures in slot order, under the skin name you type there; Copy puts it on the clipboard. Paste it under the character's entity in entity.tbl, raise its `$Num Skins` by one, and set `$SkinName` to that name on the character in pc_multi.tbl.
+- Generate Texture Atlas (Advanced) lists every texture with a tick box; only ticked textures are combined, the rest keep their own materials.
 
 ## Custom Mesh Tips
 

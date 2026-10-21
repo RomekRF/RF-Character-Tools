@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.10.1
+
+- Generate Texture Atlas lists every texture with a tick box. Only ticked textures go into the atlas; faces using unticked textures keep their material and UVs, and materials without an image are kept too. The atlas material gets alpha when a ticked texture used it, and an existing atlas material is updated in place instead of being deleted.
+- The atlas leaves the imported RF meshes alone, and a mesh shared by several selected objects is only remapped once.
+- Copy Skin Line copies at once (no dialog). The skin name and the full line are shown in the Textures panel, a popup shows what was copied, and a warning appears if the clipboard could not be written.
+
 ## v1.10.0 — Custom Character Workflow
 
 Export
