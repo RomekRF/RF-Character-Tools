@@ -1,0 +1,18 @@
+schema_version = "1.0.0"
+
+id = "rf_character_tools"
+version = "1.9.25"
+name = "RF Character Tools"
+tagline = "Import and export Red Faction V3C / RFA character meshes and animations"
+maintainer = "RomekRF"
+type = "add-on"
+
+tags = ["Import-Export", "Mesh", "Rigging", "Animation"]
+
+blender_version_min = "4.2.0"
+
+license = [
+    "SPDX:MIT",
+]
+
+website = "https://github.com/RomekRF/RF-Character-Tools"

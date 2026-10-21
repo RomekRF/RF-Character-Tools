@@ -1,7 +1,7 @@
 bl_info = {
-    "name": "RF Character Tools",
+    "name": "RF Character Tools (V3C/V3M/RFA)",
     "author": "RF VFX Tools",
-    "version": (1, 9, 21),
+    "version": (1, 9, 25),
     "blender": (4, 0, 0),
     "location": "File > Import/Export, 3D View > Sidebar > RF Character",
     "description": "Import and export Red Faction character meshes, animations, and rigs",
@@ -2950,10 +2950,10 @@ def _export_v3c(mesh_obj, arm_obj, filepath, bones_data, cspheres_data=None, pro
                             img = node.image
                             break
             if img:
-                img_name = img.name
-                if not img_name.lower().endswith('.tga'):
-                    img_name = os.path.splitext(img_name)[0] + '.tga'
-                tex_name = img_name
+                tex_name = _normalize_tex_name(img.name)
+            else:
+                # No image — fall back to the material name, also normalized
+                tex_name = _normalize_tex_name(mat.name)
             materials.append(tex_name)
             # Material flags: base = 0x01 (stock/Redux standard), alpha adds 0x08
             flag = 0x01
@@ -5090,6 +5090,86 @@ class RFCHAR_OT_ExportAllRFA(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _material_base_color_image(mat):
+    """Return the image used by a material's Base Color (or first image node), or None."""
+    if not mat or not mat.use_nodes or not mat.node_tree:
+        return None
+    bsdf = mat.node_tree.nodes.get('Principled BSDF')
+    if bsdf and 'Base Color' in bsdf.inputs:
+        for link in bsdf.inputs['Base Color'].links:
+            if link.from_node.type == 'TEX_IMAGE' and link.from_node.image:
+                return link.from_node.image
+    for node in mat.node_tree.nodes:
+        if node.type == 'TEX_IMAGE' and node.image:
+            return node.image
+    return None
+
+
+# Image extensions Blender or our own pipeline might leave on an image
+# datablock name. Used by _normalize_tex_name to produce a clean '<base>.tga'.
+_KNOWN_IMG_EXTS = ('.png', '.jpg', '.jpeg', '.dds', '.bmp', '.tif', '.tiff',
+                   '.exr', '.psd', '.gif', '.tga')
+
+
+def _normalize_tex_name(name):
+    """Return '<base>.tga' for any image datablock name, iteratively stripping
+    every known image extension so 'foo.png.tga' becomes 'foo.tga' rather than
+    being passed through as-is. Empty input becomes 'default.tga'."""
+    if not name:
+        return 'default.tga'
+    base = name
+    while True:
+        low = base.lower()
+        stripped = False
+        for ext in _KNOWN_IMG_EXTS:
+            if low.endswith(ext):
+                base = base[:-len(ext)]
+                stripped = True
+                break
+        if not stripped:
+            break
+    base = base.rstrip('. ')
+    return (base or 'default') + '.tga'
+
+
+def _sync_material_names_to_textures(mesh_obj):
+    """Rename each material on mesh_obj to match its image texture's base name (no extension).
+
+    Used by the V3C exporter's 'Rename materials to texture names' option.
+    Materials with no image texture are left untouched. Returns a list of
+    (old_name, new_name) tuples for materials that were actually renamed,
+    plus a list of conflict messages for materials that could not be renamed.
+    """
+    renamed = []
+    conflicts = []
+    seen = set()
+    for slot in mesh_obj.material_slots:
+        mat = slot.material
+        if not mat or mat.name in seen:
+            continue
+        seen.add(mat.name)
+
+        img = _material_base_color_image(mat)
+        if not img:
+            continue
+
+        # Strip every known image extension, then drop the trailing '.tga' we
+        # just added back, so 'foo.png.tga' yields 'foo' (not 'foo.png').
+        base_name = _normalize_tex_name(img.name)[:-4]
+        if not base_name or mat.name == base_name:
+            continue
+
+        existing = bpy.data.materials.get(base_name)
+        if existing and existing is not mat:
+            conflicts.append(f"'{mat.name}' → '{base_name}' (name in use)")
+            continue
+
+        old_name = mat.name
+        mat.name = base_name
+        renamed.append((old_name, mat.name))
+    return renamed, conflicts
+
+
 class RFCHAR_OT_ExportV3C(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.rf_v3c"
     bl_label = "Export RF Character Mesh (.v3c)"
@@ -5098,6 +5178,14 @@ class RFCHAR_OT_ExportV3C(bpy.types.Operator, ExportHelper):
 
     filename_ext = ".v3c"
     filter_glob: StringProperty(default="*.v3c;*.v3m", options={'HIDDEN'})
+
+    sync_material_names: BoolProperty(
+        name="Rename materials to texture names",
+        description="Rename each material to match its image texture's base filename "
+                    "(e.g. 'RMK_RedWall01.tga' → material 'RMK_RedWall01'). "
+                    "Materials with no image texture are left alone",
+        default=True,
+    )
 
     def invoke(self, context, event):
         arm_obj = _find_rf_armature(context)
@@ -5172,6 +5260,19 @@ class RFCHAR_OT_ExportV3C(bpy.types.Operator, ExportHelper):
         bone_names = [b['name'] for b in bones_data]
         cspheres = _gather_scene_cspheres(arm_obj, bone_names) if arm_obj else []
         prop_points = _gather_scene_prop_points(arm_obj, bone_names) if arm_obj else []
+
+        # Optionally rename materials to match their texture's base filename
+        # (e.g. material 'Mat.001' with image 'RMK_RedWall01.tga' → material 'RMK_RedWall01').
+        # Runs before _export_v3c so the writer also sees the cleaned-up names.
+        if self.sync_material_names:
+            try:
+                renamed, conflicts = _sync_material_names_to_textures(mesh_obj)
+                if renamed:
+                    self.report({'INFO'}, f"Renamed {len(renamed)} material(s) to match texture names")
+                for c in conflicts:
+                    self.report({'WARNING'}, f"Material rename skipped: {c}")
+            except Exception as e:
+                self.report({'WARNING'}, f"Material rename failed: {e}")
 
         try:
             nv, nt = _export_v3c(mesh_obj, arm_obj, self.filepath, bones_data, cspheres, prop_points)
@@ -5384,6 +5485,15 @@ class RFCHAR_OT_ValidateExport(bpy.types.Operator):
                     # Check extension
                     if not img.name.lower().endswith('.tga'):
                         wrong_ext.append(img.name)
+                    # Double-extension check — 'foo.png.tga' is the classic
+                    # crash trigger; if this fires, exporting now (v1.9.25+)
+                    # will clean it, but we still surface it as a warning.
+                    low = img.name.lower()
+                    inner_exts = ('.png.', '.jpg.', '.jpeg.', '.dds.', '.bmp.',
+                                  '.tif.', '.tiff.', '.exr.', '.psd.', '.gif.')
+                    if low.endswith('.tga') and any(e in low for e in inner_exts):
+                        if img.name not in wrong_ext:
+                            wrong_ext.append(f"{img.name} (double-ext)")
                     # Check material name matches image base
                     img_base = os.path.splitext(img.name)[0]
                     if m.name != img_base:
@@ -5465,55 +5575,6 @@ class RFCHAR_OT_RenameActionsToDB(bpy.types.Operator):
                 renamed += 1
 
         self.report({'INFO'}, f"Renamed {renamed} action{'s' if renamed != 1 else ''}")
-        return {'FINISHED'}
-
-
-class RFCHAR_OT_BatchExportV3C(bpy.types.Operator):
-    bl_idname = "rfchar.batch_export_v3c"
-    bl_label = "Batch Export V3Cs"
-    bl_description = "Export each selected armature to its own V3C file in a chosen folder"
-    bl_options = {'REGISTER'}
-
-    directory: StringProperty(subtype='DIR_PATH')
-
-    def invoke(self, context, event):
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
-
-    def execute(self, context):
-        # Collect armatures to export (selected + active)
-        armatures = [o for o in context.selected_objects if o.type == 'ARMATURE' and o.get('rf_bones')]
-        if context.active_object and context.active_object.type == 'ARMATURE' and context.active_object not in armatures:
-            if context.active_object.get('rf_bones'):
-                armatures.append(context.active_object)
-
-        if not armatures:
-            self.report({'ERROR'}, "Select one or more RF armatures to export")
-            return {'CANCELLED'}
-
-        folder = bpy.path.abspath(self.directory)
-        if not os.path.isdir(folder):
-            self.report({'ERROR'}, f"Folder not found: {folder}")
-            return {'CANCELLED'}
-
-        original_active = context.view_layer.objects.active
-        exported = 0
-        failed = 0
-        for arm in armatures:
-            source = arm.get('rf_source_file', arm.name + '.v3c')
-            if not source.lower().endswith('.v3c'):
-                source = os.path.splitext(source)[0] + '.v3c'
-            out_path = os.path.join(folder, source)
-            try:
-                context.view_layer.objects.active = arm
-                bpy.ops.export_scene.rf_v3c(filepath=out_path)
-                exported += 1
-            except Exception as e:
-                self.report({'WARNING'}, f"Failed {arm.name}: {e}")
-                failed += 1
-
-        context.view_layer.objects.active = original_active
-        self.report({'INFO'}, f"Exported {exported}/{len(armatures)} V3Cs to {folder}")
         return {'FINISHED'}
 
 
@@ -5982,18 +6043,18 @@ class RFCHAR_OT_FixTextureNames(bpy.types.Operator):
                     issues.append(f"'{mat.name}' has no image texture")
                     continue
 
-                # Force .tga extension on image name
+                # Force a clean .tga extension on the image name (strips any
+                # accumulated double extensions like 'foo.png.tga' → 'foo.tga')
                 old_img_name = img.name
                 if self.force_tga:
-                    base = os.path.splitext(img.name)[0]
-                    new_img_name = base + '.tga'
+                    new_img_name = _normalize_tex_name(img.name)
                     if img.name != new_img_name:
                         img.name = new_img_name
                         fixed_imgs += 1
 
                 # Sync material name to match image (without extension)
                 if self.sync_material_names:
-                    base_name = os.path.splitext(img.name)[0]
+                    base_name = _normalize_tex_name(img.name)[:-4]  # drop trailing .tga
                     if mat.name != base_name:
                         # Check for conflicts
                         existing = bpy.data.materials.get(base_name)
@@ -6148,7 +6209,6 @@ class RFCHAR_PT_MainPanel(bpy.types.Panel):
             col = box.column(align=True)
             col.operator("rfchar.validate_export", text="Validate", icon='CHECKMARK')
             col.operator("export_scene.rf_v3c", text="Export V3C", icon='MESH_DATA')
-            col.operator("rfchar.batch_export_v3c", text="Batch Export", icon='FILE_FOLDER')
             col.separator()
             active_action = arm_obj.animation_data.action if arm_obj.animation_data else None
             if active_action:
@@ -6425,7 +6485,6 @@ _classes = (
     RFCHAR_OT_ClearRecent,
     RFCHAR_OT_ValidateExport,
     RFCHAR_OT_RenameActionsToDB,
-    RFCHAR_OT_BatchExportV3C,
     RFCHAR_OT_GenerateAtlas,
     RFCHAR_OT_FixTextureNames,
     RFCHAR_OT_ExportRFA,
